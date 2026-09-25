@@ -45,7 +45,7 @@ async def get_index():
             .btn-add {{ padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }}
             .btn-add:hover {{ background: #059669; }}
             
-            .btn-reset {{ padding: 12px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; width: 100%; margin-top: 20px; font-weight: bold; }}
+            .btn- {{ padding: 12px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; width: 100%; margin-top: 20px; font-weight: bold; }}
             .btn-reset:hover {{ background: #dc2626; }}
             
             ul {{ list-style: none; padding: 0; }}
