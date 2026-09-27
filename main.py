@@ -1,26 +1,41 @@
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 import uvicorn
+import sqlite3
 
 app = FastAPI()
-
-# Переменные теперь включают суточную цель
-total_calories = 0
-history = []
 DAILY_GOAL = 2000 
+
+# Автоматически создаем базу данных и таблицу при первом запуске
+def init_db():
+    with sqlite3.connect("calories.db") as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                cal INTEGER NOT NULL
+            )
+        """)
+init_db()
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
-    # Генерируем список съеденного
+    with sqlite3.connect("calories.db") as conn:
+        # Достаем все записи из БД (новые сверху)
+        cursor = conn.execute("SELECT name, cal FROM history ORDER BY id DESC")
+        history = [{"name": row[0], "cal": row[1]} for row in cursor.fetchall()]
+        
+        # Заставляем саму базу данных посчитать сумму калорий
+        cursor = conn.execute("SELECT SUM(cal) FROM history")
+        total_calories = cursor.fetchone()[0] or 0
+
     items_html = "".join(
         f"<li><span>{item['name']}</span> <b>{item['cal']} ккал</b></li>" 
         for item in history
     )
     
-    # Математика для прогресс-бара
     remaining = max(0, DAILY_GOAL - total_calories)
-    percent = min(100, int((total_calories / DAILY_GOAL) * 100))
-    # Если переели, цвет станет красным, если в норме - зеленым
+    percent = min(100, int((total_calories / DAILY_GOAL) * 100)) if DAILY_GOAL else 0
     color = "#10b981" if total_calories <= DAILY_GOAL else "#ef4444"
 
     html = f"""
@@ -31,25 +46,28 @@ async def get_index():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Счетчик калорий</title>
         <style>
-            body {{ font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; color: #333; }}
-            .dashboard {{ background: #f4f4f5; padding: 30px; border-radius: 12px; text-align: center; margin-bottom: 20px; }}
-            .calories {{ font-size: 48px; color: {color}; font-weight: bold; margin: 10px 0; transition: color 0.3s; }}
-            .goal-info {{ color: #666; margin-bottom: 15px; font-size: 14px; }}
+            /* CSS-переменные для автоматического переключения светлой/темной темы */
+            :root {{ --bg: #ffffff; --text: #333; --dash-bg: #f4f4f5; --item-bg: #fff; --border: #eee; }}
+            @media (prefers-color-scheme: dark) {{
+                :root {{ --bg: #1e1e2e; --text: #cdd6f4; --dash-bg: #313244; --item-bg: #45475a; --border: #313244; }}
+            }}
             
-            /* Стили прогресс-бара */
-            .progress-bar {{ width: 100%; height: 12px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }}
-            .progress-fill {{ width: {percent}%; height: 100%; background: {color}; transition: width 0.4s ease-out, background-color 0.3s; }}
+            body {{ font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background: var(--bg); color: var(--text); transition: background 0.3s; }}
+            .dashboard {{ background: var(--dash-bg); padding: 30px; border-radius: 12px; text-align: center; margin-bottom: 20px; }}
+            .calories {{ font-size: 48px; color: {color}; font-weight: bold; margin: 10px 0; }}
+            .goal-info {{ color: #a6adc8; margin-bottom: 15px; font-size: 14px; }}
+            
+            .progress-bar {{ width: 100%; height: 12px; background: var(--border); border-radius: 6px; overflow: hidden; }}
+            .progress-fill {{ width: {percent}%; height: 100%; background: {color}; transition: width 0.4s ease-out; }}
             
             form {{ display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }}
-            input {{ flex: 1; min-width: 120px; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }}
-            .btn-add {{ padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }}
-            .btn-add:hover {{ background: #059669; }}
+            input {{ flex: 1; min-width: 120px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 16px; background: var(--item-bg); color: var(--text); }}
             
-            .btn- {{ padding: 12px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; width: 100%; margin-top: 20px; font-weight: bold; }}
-            .btn-reset:hover {{ background: #dc2626; }}
+            .btn-add {{ padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }}
+            .btn-reset {{ padding: 12px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; width: 100%; margin-top: 20px; font-weight: bold; }}
             
             ul {{ list-style: none; padding: 0; }}
-            li {{ background: #fff; padding: 12px; border: 1px solid #eee; margin-bottom: 8px; border-radius: 6px; display: flex; justify-content: space-between; }}
+            li {{ background: var(--item-bg); padding: 12px; border: 1px solid var(--border); margin-bottom: 8px; border-radius: 6px; display: flex; justify-content: space-between; }}
         </style>
     </head>
     <body>
@@ -57,9 +75,7 @@ async def get_index():
             <h3>Съедено за сегодня</h3>
             <div class="calories">{total_calories}</div>
             <div class="goal-info">Осталось: {remaining} ккал из {DAILY_GOAL}</div>
-            <div class="progress-bar">
-                <div class="progress-fill"></div>
-            </div>
+            <div class="progress-bar"><div class="progress-fill"></div></div>
         </div>
 
         <form action="/add" method="post">
@@ -68,11 +84,8 @@ async def get_index():
             <button type="submit" class="btn-add">Добавить</button>
         </form>
 
-        <ul>
-            {items_html}
-        </ul>
+        <ul>{items_html}</ul>
 
-        <!-- Новая форма для сброса -->
         <form action="/reset" method="post">
             <button type="submit" class="btn-reset">Сбросить счетчик (Новый день)</button>
         </form>
@@ -83,17 +96,16 @@ async def get_index():
 
 @app.post("/add")
 async def add_record(food: str = Form(...), cal: int = Form(...)):
-    global total_calories
-    total_calories += cal
-    history.insert(0, {"name": food, "cal": cal})
+    with sqlite3.connect("calories.db") as conn:
+        # Записываем новые данные прямо в файл БД
+        conn.execute("INSERT INTO history (name, cal) VALUES (?, ?)", (food, cal))
     return RedirectResponse(url="/", status_code=303)
 
-# Новый роут для сброса данных
 @app.post("/reset")
 async def reset_records():
-    global total_calories, history
-    total_calories = 0
-    history.clear()
+    with sqlite3.connect("calories.db") as conn:
+        # Очищаем таблицу
+        conn.execute("DELETE FROM history")
     return RedirectResponse(url="/", status_code=303)
 
 if __name__ == "__main__":
