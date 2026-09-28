@@ -4,9 +4,7 @@ import uvicorn
 import sqlite3
 
 app = FastAPI()
-DAILY_GOAL = 2000 
 
-# Автоматически создаем базу данных и таблицу при первом запуске
 def init_db():
     with sqlite3.connect("calories.db") as conn:
         conn.execute("""
@@ -16,79 +14,157 @@ def init_db():
                 cal INTEGER NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                daily_goal INTEGER NOT NULL
+            )
+        """)
+        conn.execute("INSERT OR IGNORE INTO settings (id, daily_goal) VALUES (1, 2000)")
 init_db()
 
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
     with sqlite3.connect("calories.db") as conn:
-        # Достаем все записи из БД (новые сверху)
-        cursor = conn.execute("SELECT name, cal FROM history ORDER BY id DESC")
-        history = [{"name": row[0], "cal": row[1]} for row in cursor.fetchall()]
+        cursor = conn.execute("SELECT id, name, cal FROM history ORDER BY id DESC")
+        history = [{"id": row[0], "name": row[1], "cal": row[2]} for row in cursor.fetchall()]
         
-        # Заставляем саму базу данных посчитать сумму калорий
         cursor = conn.execute("SELECT SUM(cal) FROM history")
         total_calories = cursor.fetchone()[0] or 0
+        
+        cursor = conn.execute("SELECT daily_goal FROM settings WHERE id = 1")
+        daily_goal = cursor.fetchone()[0]
 
     items_html = "".join(
-        f"<li><span>{item['name']}</span> <b>{item['cal']} ккал</b></li>" 
+        f"""
+        <li class="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 mb-3 transition hover:shadow-md">
+            <div class="flex flex-col">
+                <span class="font-semibold text-slate-800 dark:text-slate-100">{item['name']}</span>
+                <span class="text-sm font-medium text-emerald-500 mt-1">{item['cal']} ккал</span>
+            </div>
+            <form action="/delete/{item['id']}" method="post" class="m-0 flex items-center">
+                <button type="submit" class="text-slate-400 hover:text-red-500 bg-slate-50 dark:bg-slate-900/50 hover:bg-red-50 dark:hover:bg-red-900/30 w-10 h-10 rounded-xl transition-all flex items-center justify-center shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 6h18"></path>
+                        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                    </svg>
+                </button>
+            </form>
+        </li>
+        """
         for item in history
     )
     
-    remaining = max(0, DAILY_GOAL - total_calories)
-    percent = min(100, int((total_calories / DAILY_GOAL) * 100)) if DAILY_GOAL else 0
-    color = "#10b981" if total_calories <= DAILY_GOAL else "#ef4444"
+    remaining = max(0, daily_goal - total_calories)
+    is_over = total_calories > daily_goal
+    color_class = "text-emerald-500" if not is_over else "text-red-500"
 
     html = f"""
     <!DOCTYPE html>
-    <html lang="ru">
+    <html lang="ru" class="antialiased">
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Счетчик калорий</title>
-        <style>
-            /* CSS-переменные для автоматического переключения светлой/темной темы */
-            :root {{ --bg: #ffffff; --text: #333; --dash-bg: #f4f4f5; --item-bg: #fff; --border: #eee; }}
-            @media (prefers-color-scheme: dark) {{
-                :root {{ --bg: #1e1e2e; --text: #cdd6f4; --dash-bg: #313244; --item-bg: #45475a; --border: #313244; }}
+        <title>Калькулятор калорий 2.0</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script>
+            tailwind.config = {{
+                darkMode: 'media',
+                theme: {{ extend: {{ fontFamily: {{ sans: ['system-ui', 'sans-serif'] }} }} }}
             }}
-            
-            body {{ font-family: system-ui, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background: var(--bg); color: var(--text); transition: background 0.3s; }}
-            .dashboard {{ background: var(--dash-bg); padding: 30px; border-radius: 12px; text-align: center; margin-bottom: 20px; }}
-            .calories {{ font-size: 48px; color: {color}; font-weight: bold; margin: 10px 0; }}
-            .goal-info {{ color: #a6adc8; margin-bottom: 15px; font-size: 14px; }}
-            
-            .progress-bar {{ width: 100%; height: 12px; background: var(--border); border-radius: 6px; overflow: hidden; }}
-            .progress-fill {{ width: {percent}%; height: 100%; background: {color}; transition: width 0.4s ease-out; }}
-            
-            form {{ display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }}
-            input {{ flex: 1; min-width: 120px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 16px; background: var(--item-bg); color: var(--text); }}
-            
-            .btn-add {{ padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }}
-            .btn-reset {{ padding: 12px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 15px; width: 100%; margin-top: 20px; font-weight: bold; }}
-            
-            ul {{ list-style: none; padding: 0; }}
-            li {{ background: var(--item-bg); padding: 12px; border: 1px solid var(--border); margin-bottom: 8px; border-radius: 6px; display: flex; justify-content: space-between; }}
+        </script>
+        <style>
+            body {{ background-color: #f8fafc; }}
+            @media (prefers-color-scheme: dark) {{ body {{ background-color: #0f172a; }} }}
+            .custom-scrollbar::-webkit-scrollbar {{ width: 6px; }}
+            .custom-scrollbar::-webkit-scrollbar-thumb {{ background-color: #cbd5e1; border-radius: 10px; }}
+            .dark .custom-scrollbar::-webkit-scrollbar-thumb {{ background-color: #475569; }}
         </style>
     </head>
-    <body>
-        <div class="dashboard">
-            <h3>Съедено за сегодня</h3>
-            <div class="calories">{total_calories}</div>
-            <div class="goal-info">Осталось: {remaining} ккал из {DAILY_GOAL}</div>
-            <div class="progress-bar"><div class="progress-fill"></div></div>
+    <body class="text-slate-800 dark:text-slate-200 transition-colors duration-300 min-h-screen py-10 px-4">
+        <div class="max-w-md mx-auto p-6 sm:p-8 bg-white dark:bg-slate-900 rounded-[2.5rem] shadow-2xl border border-slate-100 dark:border-slate-800/60 overflow-hidden">
+            
+            <div class="flex justify-between items-center mb-8">
+                <h1 class="text-2xl font-black tracking-tight text-slate-800 dark:text-white">Счетчик<br><span class="text-emerald-500">Калорий</span></h1>
+                <div class="text-xs font-bold px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-full text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                    Цель: {daily_goal}
+                </div>
+            </div>
+
+            <div class="relative flex justify-center items-center mb-10 h-56">
+                <canvas id="calorieChart"></canvas>
+                <div class="absolute flex flex-col items-center justify-center pointer-events-none mt-2">
+                    <span class="text-5xl font-black {color_class} tracking-tighter drop-shadow-sm transition-colors">{total_calories}</span>
+                    <span class="text-sm text-slate-400 font-semibold mt-1 uppercase tracking-widest">ккал</span>
+                </div>
+            </div>
+
+            <form action="/add" method="post" class="flex gap-2 mb-10 h-14">
+                <input type="text" name="food" placeholder="Что съели?" required class="flex-1 min-w-0 px-4 font-medium bg-slate-50 dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-700 rounded-2xl focus:outline-none focus:border-emerald-500 dark:focus:border-emerald-500 transition placeholder-slate-400 text-slate-700 dark:text-slate-200 shadow-inner">
+                <input type="number" name="cal" placeholder="Ккал" required class="w-20 shrink-0 min-w-0 px-2 font-medium bg-slate-50 dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-700 rounded-2xl focus:outline-none focus:border-emerald-500 dark:focus:border-emerald-500 transition placeholder-slate-400 text-slate-700 dark:text-slate-200 shadow-inner text-center">
+                <button type="submit" class="w-14 shrink-0 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl shadow-lg shadow-emerald-500/40 transition transform hover:-translate-y-1 active:translate-y-0 flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                </button>
+            </form>
+
+            <div class="mb-8">
+                <div class="flex justify-between items-end mb-4">
+                    <h3 class="text-lg font-bold text-slate-700 dark:text-slate-300">История</h3>
+                    <span class="text-sm font-semibold text-slate-400">Осталось: {remaining}</span>
+                </div>
+                <ul class="max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                    {items_html if items_html else '<div class="text-center text-slate-400 dark:text-slate-500 font-medium py-8 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700">Тут пока пусто. Пора перекусить! 🥪</div>'}
+                </ul>
+            </div>
+
+            <div class="flex flex-col gap-3 pt-6 border-t border-slate-100 dark:border-slate-800">
+                <form action="/set_goal" method="post" class="flex gap-2 h-12">
+                    <input type="number" name="new_goal" placeholder="Новая норма" required class="flex-1 min-w-0 px-4 font-medium bg-slate-50 dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-sm">
+                    <button type="submit" class="shrink-0 px-5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 text-sm font-bold rounded-xl transition">Задать</button>
+                </form>
+                <form action="/reset" method="post" class="h-12">
+                    <button type="submit" class="w-full h-full px-5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 text-sm font-bold rounded-xl transition">
+                        Сбросить день
+                    </button>
+                </form>
+            </div>
         </div>
 
-        <form action="/add" method="post">
-            <input type="text" name="food" placeholder="Название продукта" required>
-            <input type="number" name="cal" placeholder="Ккал" required>
-            <button type="submit" class="btn-add">Добавить</button>
-        </form>
+        <script>
+            const ctx = document.getElementById('calorieChart').getContext('2d');
+            const consumed = {total_calories};
+            const goal = {daily_goal};
+            const remaining = Math.max(0, goal - consumed);
+            
+            const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const emptyColor = isDark ? '#1e293b' : '#f1f5f9';
+            const highlightColor = consumed > goal ? '#ef4444' : '#10b981';
 
-        <ul>{items_html}</ul>
-
-        <form action="/reset" method="post">
-            <button type="submit" class="btn-reset">Сбросить счетчик (Новый день)</button>
-        </form>
+            new Chart(ctx, {{
+                type: 'doughnut',
+                data: {{
+                    labels: ['Съедено', 'Осталось'],
+                    datasets: [{{
+                        data: [consumed, remaining],
+                        backgroundColor: [highlightColor, emptyColor],
+                        borderWidth: 0,
+                        cutout: '82%',
+                        borderRadius: 20
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {{ animateScale: true, animateRotate: true, duration: 1200 }},
+                    plugins: {{ legend: {{ display: false }}, tooltip: {{ enabled: false }} }}
+                }}
+            }});
+        </script>
     </body>
     </html>
     """
@@ -97,14 +173,24 @@ async def get_index():
 @app.post("/add")
 async def add_record(food: str = Form(...), cal: int = Form(...)):
     with sqlite3.connect("calories.db") as conn:
-        # Записываем новые данные прямо в файл БД
         conn.execute("INSERT INTO history (name, cal) VALUES (?, ?)", (food, cal))
+    return RedirectResponse(url="/", status_code=303)
+
+@app.post("/delete/{item_id}")
+async def delete_record(item_id: int):
+    with sqlite3.connect("calories.db") as conn:
+        conn.execute("DELETE FROM history WHERE id = ?", (item_id,))
+    return RedirectResponse(url="/", status_code=303)
+
+@app.post("/set_goal")
+async def set_goal(new_goal: int = Form(...)):
+    with sqlite3.connect("calories.db") as conn:
+        conn.execute("UPDATE settings SET daily_goal = ? WHERE id = 1", (new_goal,))
     return RedirectResponse(url="/", status_code=303)
 
 @app.post("/reset")
 async def reset_records():
     with sqlite3.connect("calories.db") as conn:
-        # Очищаем таблицу
         conn.execute("DELETE FROM history")
     return RedirectResponse(url="/", status_code=303)
 
