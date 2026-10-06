@@ -2,6 +2,7 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 import uvicorn
 import sqlite3
+import json
 
 app = FastAPI()
 
@@ -66,6 +67,7 @@ def get_fitness_coach(cal, p, f, c, water, goal):
 # ================= 3. ШАБЛОНИЗАТОР =================
 def render_page(title: str, content: str, active_tab: str = "home", scripts: str = ""):
     home_active = "text-emerald-500" if active_tab == "home" else "text-slate-400 hover:text-emerald-500"
+    stats_active = "text-emerald-500" if active_tab == "stats" else "text-slate-400 hover:text-emerald-500"
     prof_active = "text-emerald-500" if active_tab == "profile" else "text-slate-400 hover:text-emerald-500"
     
     return f"""
@@ -101,14 +103,19 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
                 {content}
             </div>
 
+            <!-- Тройное нижнее меню -->
             <div class="absolute bottom-0 w-full h-[75px] bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-100 dark:border-slate-800 flex justify-around items-center z-50 pb-safe">
-                <a href="/" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {home_active} active:scale-95 w-1/2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-                    <span class="text-[11px] font-medium tracking-wide">Дневник</span>
+                <a href="/" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {home_active} active:scale-95 w-1/3">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+                    <span class="text-[10px] font-semibold tracking-wide">Дневник</span>
                 </a>
-                <a href="/profile" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {prof_active} active:scale-95 w-1/2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                    <span class="text-[11px] font-medium tracking-wide">Профиль</span>
+                <a href="/stats" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {stats_active} active:scale-95 w-1/3">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+                    <span class="text-[10px] font-semibold tracking-wide">Статистика</span>
+                </a>
+                <a href="/profile" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {prof_active} active:scale-95 w-1/3">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                    <span class="text-[10px] font-semibold tracking-wide">Профиль</span>
                 </a>
             </div>
         </div>
@@ -219,17 +226,14 @@ async def get_index():
 
         <div class="bg-white dark:bg-slate-800 p-5 rounded-3xl mb-6 border border-slate-100 dark:border-slate-700/50 shadow-sm">
             <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4">Макронутриенты</h3>
-            
             <div class="mb-4">
                 <div class="flex justify-between text-xs font-medium mb-1.5"><span class="text-slate-600 dark:text-slate-400">Белки</span><span class="text-slate-900 dark:text-slate-300">{total_p} / {goal_p} г</span></div>
                 <div class="w-full bg-slate-100 dark:bg-slate-900 rounded-full h-2 overflow-hidden"><div id="bar-p" class="bg-blue-500 h-2 rounded-full macro-bar"></div></div>
             </div>
-            
             <div class="mb-4">
                 <div class="flex justify-between text-xs font-medium mb-1.5"><span class="text-slate-600 dark:text-slate-400">Жиры</span><span class="text-slate-900 dark:text-slate-300">{total_f} / {goal_f} г</span></div>
                 <div class="w-full bg-slate-100 dark:bg-slate-900 rounded-full h-2 overflow-hidden"><div id="bar-f" class="bg-amber-500 h-2 rounded-full macro-bar"></div></div>
             </div>
-            
             <div>
                 <div class="flex justify-between text-xs font-medium mb-1.5"><span class="text-slate-600 dark:text-slate-400">Углеводы</span><span class="text-slate-900 dark:text-slate-300">{total_c} / {goal_c} г</span></div>
                 <div class="w-full bg-slate-100 dark:bg-slate-900 rounded-full h-2 overflow-hidden"><div id="bar-c" class="bg-emerald-500 h-2 rounded-full macro-bar"></div></div>
@@ -320,7 +324,106 @@ async def get_index():
     return render_page("Дневник Питания", content, active_tab="home", scripts=scripts)
 
 
-# ================= 5. СТРАНИЦА ПРОФИЛЯ =================
+# ================= 5. НОВАЯ СТРАНИЦА: СТАТИСТИКА И АРХИВ =================
+@app.get("/stats", response_class=HTMLResponse)
+async def get_stats():
+    with sqlite3.connect("calories.db") as conn:
+        cursor = conn.execute("SELECT daily_goal FROM settings WHERE id = 1")
+        daily_goal = cursor.fetchone()[0]
+        
+        # Получаем последние 7 дней из архива (Сортировка DESC, но для графика перевернем)
+        cursor = conn.execute("SELECT date, cal, p, f, c, water FROM archive ORDER BY id DESC LIMIT 7")
+        archive_data = cursor.fetchall()
+
+    chart_labels = []
+    chart_data = []
+    
+    # Подготовка данных для графика (в хронологическом порядке)
+    for row in reversed(archive_data):
+        date_str = row[0].split()[0] # Берем только YYYY-MM-DD
+        chart_labels.append(date_str[5:]) # MM-DD
+        chart_data.append(row[1])
+
+    archive_html = "".join(
+        f"""
+        <div class="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-100 dark:border-slate-700/50 mb-3 shadow-sm">
+            <div class="flex justify-between items-center mb-2">
+                <span class="font-semibold text-slate-800 dark:text-slate-200">{row[0].split()[0]}</span>
+                <span class="text-sm font-bold text-emerald-500">{row[1]} ккал</span>
+            </div>
+            <div class="flex justify-between text-xs text-slate-500">
+                <span>Б: {row[2]} Ж: {row[3]} У: {row[4]}</span>
+                <span class="text-blue-500 font-medium">💧 {row[5]} мл</span>
+            </div>
+        </div>
+        """
+        for row in archive_data
+    )
+
+    content = f"""
+        <div class="flex items-center justify-between mb-6">
+            <h1 class="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Статистика</h1>
+        </div>
+
+        <div class="bg-white dark:bg-slate-800 p-5 rounded-3xl mb-8 border border-slate-100 dark:border-slate-700/50 shadow-sm">
+            <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4">График калорий (7 дней)</h3>
+            <div class="relative h-[200px] w-full">
+                <canvas id="weeklyChart"></canvas>
+            </div>
+        </div>
+
+        <div class="mb-4">
+            <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4 px-1">Архив дней</h3>
+            <div class="flex flex-col">
+                {archive_html if archive_html else '<div class="text-center text-slate-500 py-8 bg-white dark:bg-slate-800 rounded-2xl border border-slate-100 dark:border-slate-700/50 text-sm">Вы еще не завершили ни одного дня</div>'}
+            </div>
+        </div>
+    """
+
+    scripts = f"""
+        <script>
+            const ctx = document.getElementById('weeklyChart').getContext('2d');
+            const labels = {json.dumps(chart_labels)};
+            const data = {json.dumps(chart_data)};
+            const goal = {daily_goal};
+            
+            const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+            new Chart(ctx, {{
+                type: 'bar',
+                data: {{
+                    labels: labels,
+                    datasets: [{{
+                        label: 'Калории',
+                        data: data,
+                        backgroundColor: '#10b981',
+                        borderRadius: 6,
+                        barPercentage: 0.6
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{ legend: {{ display: false }} }},
+                    scales: {{
+                        y: {{ 
+                            beginAtZero: true, 
+                            grid: {{ color: isDark ? '#334155' : '#e2e8f0' }},
+                            ticks: {{ color: isDark ? '#94a3b8' : '#64748b' }}
+                        }},
+                        x: {{
+                            grid: {{ display: false }},
+                            ticks: {{ color: isDark ? '#94a3b8' : '#64748b' }}
+                        }}
+                    }}
+                }}
+            }});
+        </script>
+    """
+    return render_page("Статистика", content, active_tab="stats", scripts=scripts)
+
+
+# ================= 6. СТРАНИЦА ПРОФИЛЯ =================
 @app.get("/profile", response_class=HTMLResponse)
 async def get_profile():
     with sqlite3.connect("calories.db") as conn:
@@ -407,7 +510,7 @@ async def get_profile():
             <form action="/archive_day" method="post">
                 <button type="submit" onclick="vibrateBtn()" class="w-full h-14 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-500 font-semibold rounded-2xl transition active:scale-95 text-sm flex items-center justify-center gap-2 border border-emerald-100 dark:border-emerald-900/50">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                    Завершить день
+                    Завершить день в архив
                 </button>
             </form>
             <p class="text-[11px] text-center text-slate-400 mt-3 px-4">Текущие записи будут очищены, а результат сохранен в архив.</p>
@@ -424,7 +527,7 @@ async def get_profile():
     return render_page("Профиль пользователя", content, active_tab="profile", scripts=scripts)
 
 
-# ================= 6. РОУТЫ (API) =================
+# ================= 7. РОУТЫ (API) =================
 @app.post("/add")
 async def add_record(food: str = Form(...), cal: int = Form(...), p: int = Form(0), f: int = Form(0), c: int = Form(0)):
     with sqlite3.connect("calories.db") as conn:
