@@ -13,38 +13,34 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), daily_goal INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS friends (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)")
         conn.execute("""CREATE TABLE IF NOT EXISTS archive (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+            id INTEGER PRIMARY KEY AUTOINCREMENT, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
             cal INTEGER, p INTEGER, f INTEGER, c INTEGER, water INTEGER
         )""")
-        # Новые таблицы для 9.0
         conn.execute("""CREATE TABLE IF NOT EXISTS weight_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
-            weight REAL
+            id INTEGER PRIMARY KEY AUTOINCREMENT, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, weight REAL
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS favorites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            name TEXT, cal INTEGER, p INTEGER, f INTEGER, c INTEGER
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, cal INTEGER, p INTEGER, f INTEGER, c INTEGER
         )""")
         
         conn.execute("INSERT OR IGNORE INTO settings (id, daily_goal) VALUES (1, 2000)")
         
-        # Сид начальных данных для избранного, если таблица пуста
         cursor = conn.execute("SELECT COUNT(*) FROM favorites")
         if cursor.fetchone()[0] == 0:
             conn.execute("INSERT INTO favorites (name, cal, p, f, c) VALUES ('☕ Капучино', 120, 4, 4, 10)")
             conn.execute("INSERT INTO favorites (name, cal, p, f, c) VALUES ('🍌 Банан', 105, 1, 0, 27)")
             conn.execute("INSERT INTO favorites (name, cal, p, f, c) VALUES ('🍳 Яичница (2 шт)', 180, 14, 14, 1)")
         
-        # Сид начального веса, если пуста
         cursor = conn.execute("SELECT COUNT(*) FROM weight_history")
         if cursor.fetchone()[0] == 0:
             conn.execute("INSERT INTO weight_history (weight) VALUES (70.0)")
             
         cols = {
             "history": ["p INTEGER DEFAULT 0", "f INTEGER DEFAULT 0", "c INTEGER DEFAULT 0"],
-            "settings": ["level INTEGER DEFAULT 1", "xp INTEGER DEFAULT 0", "water INTEGER DEFAULT 0", "weight REAL DEFAULT 70.0", "streak INTEGER DEFAULT 0"]
+            "settings": [
+                "level INTEGER DEFAULT 1", "xp INTEGER DEFAULT 0", "water INTEGER DEFAULT 0", "weight REAL DEFAULT 70.0", "streak INTEGER DEFAULT 0",
+                "age INTEGER DEFAULT 20", "height REAL DEFAULT 175.0", "gender TEXT DEFAULT 'male'", "activity REAL DEFAULT 1.2", "goal_type TEXT DEFAULT 'maintain'"
+            ]
         }
         for table, columns in cols.items():
             for col in columns:
@@ -103,11 +99,9 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
         <div id="toast-container" class="fixed top-4 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 w-[90%] max-w-sm pointer-events-none"></div>
 
         <div class="w-full max-w-md bg-white dark:bg-slate-900 h-full flex flex-col relative shadow-2xl border-x border-slate-100 dark:border-slate-800">
-            
             <div class="flex-1 overflow-y-auto pb-24 px-5 pt-6 custom-scrollbar">
                 {content}
             </div>
-
             <div class="absolute bottom-0 w-full h-[75px] bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-100 dark:border-slate-800 flex justify-around items-center z-50 pb-safe">
                 <a href="/" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {home_active} active:scale-95 w-1/3">
                     <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
@@ -144,6 +138,7 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
             else if (urlParams.has('deleted')) {{ showToast('Запись удалена', 'error'); }}
             else if (urlParams.has('archived')) {{ confetti({{ particleCount: 100, spread: 70, origin: {{ y: 0.5 }}, colors: ['#10b981', '#3b82f6'] }}); showToast('День завершен!', 'success'); }}
             else if (urlParams.has('saved')) {{ showToast('Сохранено', 'success'); }}
+            else if (urlParams.has('calculated')) {{ confetti({{ particleCount: 150, spread: 90, origin: {{ y: 0.5 }}, colors: ['#10b981', '#fcd34d', '#3b82f6'] }}); showToast('Умная норма рассчитана!', 'success'); }}
             window.history.replaceState({{}}, document.title, window.location.pathname);
         </script>
         {scripts}
@@ -253,15 +248,15 @@ async def get_index():
 
         <form action="/add" method="post" class="bg-white dark:bg-slate-800 p-5 rounded-3xl border border-slate-100 dark:border-slate-700/50 shadow-sm mb-8">
             <div class="flex gap-2 h-12">
-                <input type="text" name="food" placeholder="Название блюда" required class="flex-1 min-w-0 px-4 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition">
-                <input type="number" name="cal" placeholder="Ккал" required class="w-24 shrink-0 min-w-0 px-2 font-semibold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-center">
+                <input type="text" name="food" placeholder="Название блюда" required class="flex-1 min-w-0 px-4 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-slate-900 dark:text-white">
+                <input type="number" name="cal" placeholder="Ккал" required class="w-24 shrink-0 min-w-0 px-2 font-semibold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-center text-slate-900 dark:text-white">
             </div>
             <details class="group mt-2">
                 <summary class="text-[11px] font-medium text-slate-500 cursor-pointer list-none text-center hover:text-emerald-500 transition py-2 rounded-xl">Указать БЖУ ▾</summary>
                 <div class="flex gap-2 mt-1 h-10">
-                    <input type="number" name="p" value="0" placeholder="Б" class="flex-1 min-w-0 px-1 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-center">
-                    <input type="number" name="f" value="0" placeholder="Ж" class="flex-1 min-w-0 px-1 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-center">
-                    <input type="number" name="c" value="0" placeholder="У" class="flex-1 min-w-0 px-1 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-center">
+                    <input type="number" name="p" value="0" placeholder="Б" class="flex-1 min-w-0 px-1 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-center text-slate-700 dark:text-slate-300">
+                    <input type="number" name="f" value="0" placeholder="Ж" class="flex-1 min-w-0 px-1 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-center text-slate-700 dark:text-slate-300">
+                    <input type="number" name="c" value="0" placeholder="У" class="flex-1 min-w-0 px-1 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-center text-slate-700 dark:text-slate-300">
                 </div>
             </details>
             <button type="submit" onclick="vibrateBtn()" class="w-full mt-3 h-12 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold rounded-xl shadow-sm transition active:scale-95">Сохранить</button>
@@ -277,7 +272,6 @@ async def get_index():
 
     scripts = f"""
         <script>
-            // Установка времени и приветствия
             const hour = new Date().getHours();
             let greeting = 'Дневник';
             if (hour >= 5 && hour < 12) greeting = 'Доброе утро ☀️';
@@ -325,7 +319,6 @@ async def get_index():
     """
     return render_page("Дневник Питания", content, active_tab="home", scripts=scripts)
 
-
 # ================= 5. СТРАНИЦА: СТАТИСТИКА =================
 @app.get("/stats", response_class=HTMLResponse)
 async def get_stats():
@@ -342,7 +335,7 @@ async def get_stats():
     chart_labels = []
     chart_data = []
     for row in reversed(archive_data):
-        chart_labels.append(row[0].split()[0][5:]) # MM-DD
+        chart_labels.append(row[0].split()[0][5:])
         chart_data.append(row[1])
         
     w_labels = []
@@ -395,14 +388,12 @@ async def get_stats():
             const gridColor = isDark ? '#334155' : '#f1f5f9';
             const tickColor = isDark ? '#64748b' : '#94a3b8';
 
-            // График калорий
             new Chart(document.getElementById('calChart').getContext('2d'), {{
                 type: 'bar',
                 data: {{ labels: {json.dumps(chart_labels)}, datasets: [{{ label: 'Ккал', data: {json.dumps(chart_data)}, backgroundColor: '#10b981', borderRadius: 6 }}] }},
                 options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ grid: {{ color: gridColor }}, ticks: {{ color: tickColor }} }}, x: {{ grid: {{ display: false }}, ticks: {{ color: tickColor }} }} }} }}
             }});
             
-            // График веса
             new Chart(document.getElementById('weightChart').getContext('2d'), {{
                 type: 'line',
                 data: {{ labels: {json.dumps(w_labels)}, datasets: [{{ label: 'Вес (кг)', data: {json.dumps(w_data)}, borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', tension: 0.4, fill: true, pointRadius: 4, pointBackgroundColor: '#3b82f6' }}] }},
@@ -413,7 +404,7 @@ async def get_stats():
     return render_page("Аналитика", content, active_tab="stats", scripts=scripts)
 
 
-# ================= 6. СТРАНИЦА ПРОФИЛЯ =================
+# ================= 6. СТРАНИЦА ПРОФИЛЯ (С УМНЫМ КАЛЬКУЛЯТОРОМ) =================
 @app.get("/profile", response_class=HTMLResponse)
 async def get_profile():
     with sqlite3.connect("calories.db") as conn:
@@ -421,9 +412,10 @@ async def get_profile():
         stats = cursor.fetchone()
         t_meals, t_cal, t_p, t_f, t_c = stats[0] or 0, stats[1] or 0, stats[2] or 0, stats[3] or 0, stats[4] or 0
         
-        cursor = conn.execute("SELECT daily_goal, water, streak FROM settings WHERE id = 1")
+        cursor = conn.execute("SELECT daily_goal, water, streak, age, height, gender, activity, goal_type FROM settings WHERE id = 1")
         settings = cursor.fetchone()
         daily_goal, t_water, streak = settings[0], settings[1], settings[2]
+        age, height, gender, activity, goal_type = settings[3], settings[4], settings[5], settings[6], settings[7]
         
         cursor = conn.execute("SELECT weight FROM weight_history ORDER BY id DESC LIMIT 1")
         w_row = cursor.fetchone()
@@ -449,10 +441,24 @@ async def get_profile():
         f"""
         <li class="flex justify-between items-center py-2 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
             <span class="text-sm font-medium text-slate-800 dark:text-slate-200">{fav['name']} <span class="text-emerald-500 text-xs">({fav['cal']})</span></span>
-            <form action="/delete_fav/{fav['id']}" method="post" class="m-0"><button type="submit" class="text-slate-400 hover:text-red-500 px-2 py-1 text-xs">Удалить</button></form>
+            <form action="/delete_fav/{fav['id']}" method="post" class="m-0"><button type="submit" class="text-slate-400 hover:text-red-500 px-2 py-1 text-xs font-medium">Удалить</button></form>
         </li>
         """ for fav in favorites
     )
+
+    # Генератор селектов для формы калькулятора, чтобы сохранить выбранные значения
+    g_m = "selected" if gender == "male" else ""
+    g_f = "selected" if gender == "female" else ""
+    
+    a_12 = "selected" if activity == 1.2 else ""
+    a_13 = "selected" if activity == 1.375 else ""
+    a_15 = "selected" if activity == 1.55 else ""
+    a_17 = "selected" if activity == 1.725 else ""
+    a_19 = "selected" if activity == 1.9 else ""
+    
+    gt_l = "selected" if goal_type == "lose" else ""
+    gt_m = "selected" if goal_type == "maintain" else ""
+    gt_g = "selected" if goal_type == "gain" else ""
 
     content = f"""
         <div class="flex items-center justify-between mb-6">
@@ -474,23 +480,91 @@ async def get_profile():
                     <p class="text-emerald-600 dark:text-emerald-400 font-medium text-sm mt-0.5">{title}</p>
                 </div>
             </div>
+            <div class="mt-6">
+                <div class="flex justify-between items-end mb-2">
+                    <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Уровень {level}</span>
+                    <span class="text-xs font-bold text-slate-900 dark:text-white">{current_xp} / 100 XP</span>
+                </div>
+                <div class="w-full h-2 bg-slate-100 dark:bg-slate-900 rounded-full overflow-hidden">
+                    <div class="h-full bg-emerald-500 rounded-full macro-bar" id="xp-bar"></div>
+                </div>
+            </div>
         </div>
 
+        <!-- НОВЫЙ БЛОК: УМНЫЙ КАЛЬКУЛЯТОР -->
         <div class="mb-8">
-            <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4 px-1">Изменение веса и цели</h3>
-            <form action="/update_settings" method="post" class="bg-white dark:bg-slate-800 p-5 rounded-3xl border border-slate-100 dark:border-slate-700/50 shadow-sm">
-                <div class="flex flex-col gap-4 mb-5">
-                    <div>
-                        <label class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1.5 block">Суточная норма (ккал)</label>
-                        <input type="number" name="new_goal" value="{daily_goal}" required class="w-full h-12 px-4 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-slate-900 dark:text-white">
+            <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4 px-1">Метаболизм и Цели</h3>
+            
+            <!-- Ручной ввод -->
+            <form action="/update_settings" method="post" class="bg-white dark:bg-slate-800 p-5 rounded-3xl border border-slate-100 dark:border-slate-700/50 shadow-sm mb-4">
+                <div class="flex gap-4 mb-4">
+                    <div class="flex-1">
+                        <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Норма (ккал)</label>
+                        <input type="number" name="new_goal" value="{daily_goal}" required class="w-full h-12 px-4 font-bold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-slate-900 dark:text-white">
                     </div>
-                    <div>
-                        <label class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1.5 block">Текущий вес (кг)</label>
-                        <input type="number" step="0.1" name="new_weight" value="{current_weight}" required class="w-full h-12 px-4 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-slate-900 dark:text-white">
+                    <div class="flex-1">
+                        <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Вес (кг)</label>
+                        <input type="number" step="0.1" name="new_weight" value="{current_weight}" required class="w-full h-12 px-4 font-bold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 transition text-slate-900 dark:text-white">
                     </div>
                 </div>
-                <button type="submit" onclick="vibrateBtn()" class="w-full h-12 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-semibold rounded-xl transition active:scale-95">Сохранить</button>
+                <button type="submit" onclick="vibrateBtn()" class="w-full h-10 bg-slate-100 dark:bg-slate-900 text-slate-700 dark:text-slate-300 font-semibold rounded-lg transition hover:bg-slate-200 dark:hover:bg-slate-950 text-sm">Обновить вручную</button>
             </form>
+
+            <!-- Автоматический калькулятор -->
+            <details class="group bg-emerald-50 dark:bg-emerald-900/10 rounded-3xl border border-emerald-100 dark:border-emerald-900/30 shadow-sm overflow-hidden">
+                <summary class="text-sm font-semibold text-emerald-600 dark:text-emerald-500 cursor-pointer list-none p-5 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">🤖</span> Умный расчет нормы
+                    </div>
+                    <span class="text-emerald-400 group-open:rotate-180 transition-transform duration-300">▼</span>
+                </summary>
+                <div class="px-5 pb-5">
+                    <form action="/calculate_goal" method="post" class="flex flex-col gap-4">
+                        <div class="flex gap-4">
+                            <div class="flex-1">
+                                <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Пол</label>
+                                <select name="gender" class="w-full h-12 px-3 font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 text-slate-900 dark:text-white">
+                                    <option value="male" {g_m}>Мужской</option>
+                                    <option value="female" {g_f}>Женский</option>
+                                </select>
+                            </div>
+                            <div class="flex-1">
+                                <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Возраст</label>
+                                <input type="number" name="age" value="{age}" required class="w-full h-12 px-4 font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 text-slate-900 dark:text-white">
+                            </div>
+                        </div>
+                        <div class="flex gap-4">
+                            <div class="flex-1">
+                                <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Рост (см)</label>
+                                <input type="number" name="height" value="{height}" required class="w-full h-12 px-4 font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 text-slate-900 dark:text-white">
+                            </div>
+                            <div class="flex-1">
+                                <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Вес (кг)</label>
+                                <input type="number" step="0.1" name="weight" value="{current_weight}" required class="w-full h-12 px-4 font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 text-slate-900 dark:text-white">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Активность</label>
+                            <select name="activity" class="w-full h-12 px-3 font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 text-slate-900 dark:text-white text-sm">
+                                <option value="1.2" {a_12}>Минимум (Офис, нет спорта)</option>
+                                <option value="1.375" {a_13}>Легкая (Тренировки 1-3 раза в нед.)</option>
+                                <option value="1.55" {a_15}>Средняя (Тренировки 3-5 раз в нед.)</option>
+                                <option value="1.725" {a_17}>Высокая (Тяжелые тренировки 6-7 раз)</option>
+                                <option value="1.9" {a_19}>Экстрим (Физ. работа + тренировки)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1 block">Цель</label>
+                            <select name="goal_type" class="w-full h-12 px-3 font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:border-emerald-500 text-slate-900 dark:text-white text-sm">
+                                <option value="lose" {gt_l}>Снижение веса (-500 ккал)</option>
+                                <option value="maintain" {gt_m}>Поддержание формы</option>
+                                <option value="gain" {gt_g}>Набор массы (+500 ккал)</option>
+                            </select>
+                        </div>
+                        <button type="submit" onclick="vibrateBtn()" class="w-full mt-2 h-12 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl shadow-sm transition active:scale-95">Рассчитать и применить</button>
+                    </form>
+                </div>
+            </details>
         </div>
         
         <div class="mb-8">
@@ -499,20 +573,20 @@ async def get_profile():
                 <form action="/add_fav" method="post" class="flex gap-2 mb-4">
                     <input type="text" name="name" placeholder="Название" required class="flex-1 min-w-0 px-3 h-10 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm">
                     <input type="number" name="cal" placeholder="Ккал" required class="w-16 min-w-0 px-2 h-10 font-medium bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm text-center">
-                    <button type="submit" class="px-4 bg-emerald-500 text-white rounded-lg text-sm font-semibold">+</button>
+                    <button type="submit" class="px-4 bg-emerald-500 text-white rounded-lg text-sm font-semibold hover:bg-emerald-600 active:scale-95 transition">+</button>
                 </form>
-                <ul class="flex flex-col">{fav_manager if fav_manager else '<span class="text-xs text-slate-500">Пусто</span>'}</ul>
+                <ul class="flex flex-col">{fav_manager if fav_manager else '<span class="text-xs text-slate-500 text-center py-2">Пусто</span>'}</ul>
             </div>
         </div>
         
         <div class="mb-8">
-            <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4 px-1">Текущие награды</h3>
+            <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4 px-1">Достижения (Сегодня)</h3>
             <div class="grid grid-cols-2 gap-3 mb-8">
                 {ach_html}
             </div>
             
             <form action="/archive_day" method="post">
-                <button type="submit" onclick="vibrateBtn()" class="w-full h-14 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-500 font-semibold rounded-2xl transition active:scale-95 text-sm flex items-center justify-center gap-2 border border-emerald-200 dark:border-emerald-900/50 shadow-sm">
+                <button type="submit" onclick="vibrateBtn()" class="w-full h-14 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-500 font-semibold rounded-2xl transition active:scale-95 text-sm flex items-center justify-center gap-2 border border-emerald-200 dark:border-emerald-900/50 shadow-sm hover:bg-emerald-100 dark:hover:bg-emerald-900/40">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                     Завершить день в архив
                 </button>
@@ -520,7 +594,15 @@ async def get_profile():
             <p class="text-[11px] text-center text-slate-400 mt-3 px-4">Данные будут очищены и сохранены в Аналитику.</p>
         </div>
     """
-    return render_page("Профиль", content, active_tab="profile")
+    
+    scripts = f"""
+        <script>
+            setTimeout(() => {{
+                document.getElementById('xp-bar').style.width = '{current_xp}%';
+            }}, 100);
+        </script>
+    """
+    return render_page("Профиль", content, active_tab="profile", scripts=scripts)
 
 
 # ================= 7. РОУТЫ (API) =================
@@ -567,12 +649,44 @@ async def delete_record(item_id: int):
 async def update_settings(new_goal: int = Form(...), new_weight: float = Form(...)):
     with sqlite3.connect("calories.db") as conn:
         conn.execute("UPDATE settings SET daily_goal = ? WHERE id = 1", (new_goal,))
-        # Проверяем, изменился ли вес, чтобы не спамить график
         cursor = conn.execute("SELECT weight FROM weight_history ORDER BY id DESC LIMIT 1")
         last_weight = cursor.fetchone()
         if not last_weight or last_weight[0] != new_weight:
+            conn.execute("UPDATE settings SET weight = ? WHERE id = 1", (new_weight,))
             conn.execute("INSERT INTO weight_history (weight) VALUES (?)", (new_weight,))
     return RedirectResponse(url="/profile?saved=1", status_code=303)
+
+# НОВЫЙ РОУТ: Расчет нормы по формуле
+@app.post("/calculate_goal")
+async def calculate_goal(
+    gender: str = Form(...), age: int = Form(...), height: float = Form(...),
+    weight: float = Form(...), activity: float = Form(...), goal_type: str = Form(...)
+):
+    # Формула Миффлина - Сан Жеора
+    if gender == "male":
+        bmr = (10 * weight) + (6.25 * height) - (5 * age) + 5
+    else:
+        bmr = (10 * weight) + (6.25 * height) - (5 * age) - 161
+
+    tdee = bmr * activity
+
+    if goal_type == "lose": final_goal = int(tdee - 500)
+    elif goal_type == "gain": final_goal = int(tdee + 500)
+    else: final_goal = int(tdee)
+
+    with sqlite3.connect("calories.db") as conn:
+        conn.execute("""
+            UPDATE settings 
+            SET daily_goal = ?, weight = ?, age = ?, height = ?, gender = ?, activity = ?, goal_type = ?
+            WHERE id = 1
+        """, (final_goal, weight, age, height, gender, activity, goal_type))
+        
+        cursor = conn.execute("SELECT weight FROM weight_history ORDER BY id DESC LIMIT 1")
+        last_weight = cursor.fetchone()
+        if not last_weight or last_weight[0] != weight:
+            conn.execute("INSERT INTO weight_history (weight) VALUES (?)", (weight,))
+
+    return RedirectResponse(url="/profile?calculated=1", status_code=303)
 
 @app.post("/archive_day")
 async def archive_day():
