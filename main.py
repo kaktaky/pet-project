@@ -63,6 +63,17 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS favorites (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, cal INTEGER, p INTEGER, f INTEGER, c INTEGER
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS meal_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_date TEXT NOT NULL,
+            meal_type TEXT NOT NULL DEFAULT 'Приём пищи',
+            name TEXT NOT NULL,
+            cal INTEGER NOT NULL,
+            p INTEGER NOT NULL DEFAULT 0,
+            f INTEGER NOT NULL DEFAULT 0,
+            c INTEGER NOT NULL DEFAULT 0
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meal_plan_date ON meal_plan(plan_date)")
 
         conn.execute("INSERT OR IGNORE INTO settings (id, daily_goal) VALUES (1, 2000)")
 
@@ -186,6 +197,7 @@ def apply_auto_emoji(name: str):
 # ================= 3. ГЛОБАЛЬНЫЙ ШАБЛОНИЗАТОР =================
 def render_page(title: str, content: str, active_tab: str = "home", scripts: str = ""):
     home_active = "text-emerald-500" if active_tab == "home" else "text-slate-400 hover:text-emerald-500"
+    plan_active = "text-emerald-500" if active_tab == "plan" else "text-slate-400 hover:text-emerald-500"
     stats_active = "text-emerald-500" if active_tab == "stats" else "text-slate-400 hover:text-emerald-500"
     prof_active = "text-emerald-500" if active_tab == "profile" else "text-slate-400 hover:text-emerald-500"
 
@@ -248,15 +260,10 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
 
             <!-- Классическое нижнее меню -->
             <div class="absolute bottom-0 w-full h-[75px] bg-white/95 dark:bg-[#0a0a0a]/95 backdrop-blur-xl border-t border-slate-200 dark:border-slate-800 flex justify-around items-center z-40 pb-safe">
-                <a href="/" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {home_active} active:scale-95 w-1/3">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-                </a>
-                <a href="/stats" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {stats_active} active:scale-95 w-1/3">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
-                </a>
-                <a href="/profile" onclick="vibrateBtn()" class="flex flex-col items-center gap-1 transition-colors {prof_active} active:scale-95 w-1/3">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                </a>
+                <a href="/" onclick="vibrateBtn()" aria-label="Главная" class="flex flex-col items-center gap-1 transition-colors {home_active} active:scale-95 flex-1 text-[9px] font-bold"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg><span>День</span></a>
+                <a href="/plan" onclick="vibrateBtn()" aria-label="План питания" class="flex flex-col items-center gap-1 transition-colors {plan_active} active:scale-95 flex-1 text-[9px] font-bold"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line><path d="m9 15 2 2 4-4"></path></svg><span>План</span></a>
+                <a href="/stats" onclick="vibrateBtn()" aria-label="Аналитика" class="flex flex-col items-center gap-1 transition-colors {stats_active} active:scale-95 flex-1 text-[9px] font-bold"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg><span>Статистика</span></a>
+                <a href="/profile" onclick="vibrateBtn()" aria-label="Профиль" class="flex flex-col items-center gap-1 transition-colors {prof_active} active:scale-95 flex-1 text-[9px] font-bold"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg><span>Профиль</span></a>
             </div>
 
             <!-- Bottom Sheet Modal (Меню добавления) -->
@@ -535,7 +542,127 @@ def get_index():
     return render_page("Дневник Питания", content, active_tab="home", scripts=scripts)
 
 
-# ================= 5. АНАЛИТИКА И ПРОФИЛЬ =================
+# ================= 5. ПЛАН ПИТАНИЯ =================
+def parse_plan_date(value: Optional[str]) -> date:
+    """Принимает только календарную дату ISO, не позволяя планировать задним числом."""
+    if not value:
+        return date.today()
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError):
+        return date.today()
+    return parsed if parsed.isoformat() == value and parsed >= date.today() else date.today()
+
+
+@app.get("/plan", response_class=HTMLResponse)
+def get_plan(day: Optional[str] = None):
+    selected = parse_plan_date(day)
+    plan_date = selected.isoformat()
+    with db() as conn:
+        daily_goal = conn.execute("SELECT daily_goal FROM settings WHERE id = 1").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, meal_type, name, cal, p, f, c FROM meal_plan WHERE plan_date = ? ORDER BY id", (plan_date,)
+        ).fetchall()
+        favorites = conn.execute("SELECT id, name, cal, p, f, c FROM favorites ORDER BY id").fetchall()
+
+    total_cal = sum(row[3] for row in rows)
+    total_p, total_f, total_c = (sum(row[i] for row in rows) for i in (4, 5, 6))
+    remaining = daily_goal - total_cal
+    plan_items = "".join(f"""
+        <li class="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-100 dark:border-slate-700/50 flex justify-between items-center gap-2">
+            <div class="min-w-0"><span class="text-[9px] uppercase tracking-wider text-emerald-500 font-black">{escape(row[1])}</span>
+            <div class="font-bold text-sm truncate">{escape(row[2])}</div>
+            <div class="text-[10px] text-slate-500 mt-1">{row[3]} ккал · Б:{row[4]} Ж:{row[5]} У:{row[6]}</div></div>
+            <div class="flex flex-col gap-1 shrink-0">
+                {f'<form action="/plan/eat/{row[0]}" method="post"><input type="hidden" name="day" value="{plan_date}"><button class="px-3 py-2 rounded-lg bg-emerald-500 text-white text-[10px] font-bold">В дневник</button></form>' if selected == date.today() else ''}
+                <form action="/plan/delete/{row[0]}" method="post"><input type="hidden" name="day" value="{plan_date}"><button class="px-3 py-1 rounded-lg bg-slate-100 dark:bg-slate-900 text-slate-500 text-[10px] font-bold w-full">Удалить</button></form>
+            </div>
+        </li>""" for row in rows)
+    fav_options = "".join(f'<option value="{row[0]}">{escape(row[1])} · {row[2]} ккал</option>' for row in favorites)
+    tomorrow = (selected + timedelta(days=1)).isoformat()
+    previous = (selected - timedelta(days=1)).isoformat()
+    content = f"""
+        <header class="mb-6"><h1 class="text-3xl font-black tracking-tight text-slate-900 dark:text-white">План питания<span class="text-emerald-500">.</span></h1>
+        <p class="text-xs text-slate-500 mt-1">Запланируй еду заранее — фактический дневник не изменится.</p></header>
+        <form action="/plan" method="get" class="flex items-center gap-2 mb-5">
+            <a href="/plan?day={previous}" class="w-11 h-11 grid place-items-center rounded-xl bg-slate-100 dark:bg-slate-800 font-bold">‹</a>
+            <input type="date" name="day" min="{today_str()}" value="{plan_date}" onchange="this.form.submit()" class="flex-1 min-w-0 h-11 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm">
+            <a href="/plan?day={tomorrow}" class="w-11 h-11 grid place-items-center rounded-xl bg-slate-100 dark:bg-slate-800 font-bold">›</a>
+        </form>
+        <section class="p-5 rounded-3xl bg-slate-900 text-white mb-5">
+            <div class="text-[10px] uppercase tracking-widest text-slate-400">Запланировано</div>
+            <div class="text-3xl font-black mt-1">{total_cal} <span class="text-sm text-slate-400">/ {daily_goal} ккал</span></div>
+            <div class="text-xs mt-2 {'text-emerald-400' if remaining >= 0 else 'text-red-400'}">{'Остаток' if remaining >= 0 else 'Превышение'}: {abs(remaining)} ккал</div>
+            <div class="text-[10px] text-slate-400 mt-2">Б {total_p} г · Ж {total_f} г · У {total_c} г</div>
+        </section>
+        <section class="bg-white dark:bg-slate-800 p-4 rounded-3xl border border-slate-100 dark:border-slate-700/50 mb-5">
+            <h2 class="text-sm font-black mb-3">Добавить в план</h2>
+            <form action="/plan/add" method="post" class="flex flex-col gap-2">
+                <input type="hidden" name="day" value="{plan_date}">
+                <input name="name" required maxlength="80" placeholder="Название блюда" class="h-11 px-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-sm">
+                <div class="grid grid-cols-2 gap-2"><select name="meal_type" class="h-11 px-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs"><option>Завтрак</option><option>Обед</option><option>Ужин</option><option>Перекус</option></select>
+                <input type="number" name="cal" required min="0" max="20000" placeholder="Ккал" class="h-11 px-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-sm"></div>
+                <div class="grid grid-cols-3 gap-2"><input type="number" name="p" min="0" max="2000" value="0" placeholder="Белки" class="h-10 px-2 rounded-xl bg-slate-50 dark:bg-slate-900 text-center text-xs"><input type="number" name="f" min="0" max="2000" value="0" placeholder="Жиры" class="h-10 px-2 rounded-xl bg-slate-50 dark:bg-slate-900 text-center text-xs"><input type="number" name="c" min="0" max="2000" value="0" placeholder="Углев." class="h-10 px-2 rounded-xl bg-slate-50 dark:bg-slate-900 text-center text-xs"></div>
+                <button class="h-11 bg-emerald-500 text-white font-bold rounded-xl text-sm">Добавить блюдо</button>
+            </form>
+            {f'<form action="/plan/add_favorite" method="post" class="flex gap-2 mt-3"><input type="hidden" name="day" value="{plan_date}"><select name="fav_id" class="flex-1 min-w-0 h-10 px-2 rounded-xl bg-slate-50 dark:bg-slate-900 text-xs">{fav_options}</select><button class="px-3 rounded-xl bg-emerald-50 text-emerald-600 text-xs font-bold">Из избранного</button></form>' if favorites else ''}
+        </section>
+        <h2 class="text-xs uppercase tracking-widest font-black text-slate-500 mb-3">Блюда на {plan_date}</h2>
+        <ul class="flex flex-col gap-2 mb-6">{plan_items or '<li class="text-center text-xs text-slate-400 py-8">Пока ничего не запланировано</li>'}</ul>
+    """
+    return render_page("План питания", content, active_tab="plan")
+
+
+@app.post("/plan/add")
+def add_plan_item(
+    day: str = Form(...), name: str = Form(..., min_length=1, max_length=80),
+    cal: int = Form(..., ge=0, le=20000), meal_type: str = Form("Приём пищи"),
+    p: int = Form(0, ge=0, le=2000), f: int = Form(0, ge=0, le=2000), c: int = Form(0, ge=0, le=2000),
+):
+    selected = parse_plan_date(day)
+    allowed_types = {"Завтрак", "Обед", "Ужин", "Перекус", "Приём пищи"}
+    meal_type = meal_type if meal_type in allowed_types else "Приём пищи"
+    with db() as conn:
+        conn.execute("INSERT INTO meal_plan (plan_date, meal_type, name, cal, p, f, c) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (selected.isoformat(), meal_type, apply_auto_emoji(name), cal, p, f, c))
+    return RedirectResponse(url=f"/plan?day={selected.isoformat()}&saved=1", status_code=303)
+
+
+@app.post("/plan/add_favorite")
+def add_plan_favorite(day: str = Form(...), fav_id: int = Form(..., ge=1)):
+    selected = parse_plan_date(day)
+    with db() as conn:
+        fav = conn.execute("SELECT name, cal, p, f, c FROM favorites WHERE id = ?", (fav_id,)).fetchone()
+        if fav:
+            conn.execute("INSERT INTO meal_plan (plan_date, meal_type, name, cal, p, f, c) VALUES (?, 'Перекус', ?, ?, ?, ?, ?)",
+                         (selected.isoformat(), *fav))
+    return RedirectResponse(url=f"/plan?day={selected.isoformat()}&saved=1", status_code=303)
+
+
+@app.post("/plan/delete/{item_id}")
+def delete_plan_item(item_id: int, day: str = Form(...)):
+    selected = parse_plan_date(day)
+    with db() as conn:
+        conn.execute("DELETE FROM meal_plan WHERE id = ? AND plan_date = ?", (item_id, selected.isoformat()))
+    return RedirectResponse(url=f"/plan?day={selected.isoformat()}", status_code=303)
+
+
+@app.post("/plan/eat/{item_id}")
+def add_planned_to_diary(item_id: int, day: str = Form(...)):
+    selected = parse_plan_date(day)
+    if selected != date.today():
+        return RedirectResponse(url=f"/plan?day={selected.isoformat()}", status_code=303)
+    with db() as conn:
+        item = conn.execute("SELECT name, cal, p, f, c FROM meal_plan WHERE id = ? AND plan_date = ?",
+                            (item_id, selected.isoformat())).fetchone()
+        if item:
+            conn.execute("INSERT INTO history (name, cal, p, f, c, time) VALUES (?, ?, ?, ?, ?, ?)", (*item, now_hm()))
+            add_xp(conn, XP_PER_MEAL)
+            conn.execute("DELETE FROM meal_plan WHERE id = ?", (item_id,))
+    return RedirectResponse(url="/?added=1", status_code=303)
+
+
+# ================= 6. АНАЛИТИКА И ПРОФИЛЬ =================
 @app.get("/stats", response_class=HTMLResponse)
 def get_stats():
     with db() as conn:
