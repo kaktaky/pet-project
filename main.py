@@ -1,5 +1,5 @@
 """
-Дневник питания — FastAPI + SQLite, один файл.
+Дневник питания — FastAPI + SQLite.
 
 Запуск:  python main.py   (или: uvicorn main:app --reload)
 Переменные окружения (необязательные): CALORIES_DB, HOST, PORT
@@ -13,13 +13,20 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from html import escape
-from typing import Optional
+from pathlib import Path
+from typing import Literal, Optional
+from uuid import UUID
 
 import uvicorn
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from suggestions import suggest_meals, scale_nutrients
 
 app = FastAPI()
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 DB_PATH = os.getenv("CALORIES_DB", "calories.db")
 XP_PER_MEAL = 15      # опыт за одну запись еды
@@ -28,11 +35,14 @@ WATER_STEP = 250      # размер "стакана", мл
 
 # ================= 1. БАЗА ДАННЫХ И МИГРАЦИИ =================
 @contextmanager
-def db():
+def db(ensure_day=True):
     """Соединение с БД: коммит при успехе, откат при ошибке и ВСЕГДА закрытие.
     (sqlite3.connect() как контекстный менеджер соединение НЕ закрывает.)"""
     conn = sqlite3.connect(DB_PATH)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        if ensure_day:
+            rollover_day(conn)
         yield conn
         conn.commit()
     except Exception:
@@ -50,7 +60,8 @@ def add_missing_columns(conn, table, columns):
 
 
 def init_db():
-    with db() as conn:
+    with db(ensure_day=False) as conn:
+        new_favorites = not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'favorites'").fetchone()
         conn.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, cal INTEGER NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK (id = 1), daily_goal INTEGER NOT NULL)")
         conn.execute("""CREATE TABLE IF NOT EXISTS archive (
@@ -74,33 +85,34 @@ def init_db():
             c INTEGER NOT NULL DEFAULT 0
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meal_plan_date ON meal_plan(plan_date)")
+        conn.execute("CREATE TABLE IF NOT EXISTS suggestion_requests (request_id TEXT PRIMARY KEY, day TEXT NOT NULL)")
 
         conn.execute("INSERT OR IGNORE INTO settings (id, daily_goal) VALUES (1, 2000)")
 
-        if conn.execute("SELECT COUNT(*) FROM favorites").fetchone()[0] == 0:
+        if new_favorites:
             conn.executemany(
                 "INSERT INTO favorites (name, cal, p, f, c) VALUES (?, ?, ?, ?, ?)",
                 [("☕ Капучино", 120, 4, 4, 10), ("🍌 Банан", 105, 1, 0, 27), ("🍳 Яичница (2 шт)", 180, 14, 14, 1)],
             )
         if conn.execute("SELECT COUNT(*) FROM weight_history").fetchone()[0] == 0:
-            conn.execute("INSERT INTO weight_history (weight) VALUES (70.0)")
+            conn.execute("INSERT INTO weight_history (weight, date) VALUES (70.0, datetime('now', 'localtime'))")
 
         # Миграции (идемпотентные: смотрим PRAGMA table_info, а не глотаем ошибки)
-        add_missing_columns(conn, "history", ["p INTEGER DEFAULT 0", "f INTEGER DEFAULT 0", "c INTEGER DEFAULT 0", "time TEXT"])
+        add_missing_columns(conn, "history", ["p INTEGER DEFAULT 0", "f INTEGER DEFAULT 0", "c INTEGER DEFAULT 0", "time TEXT", "meal_date TEXT"])
         add_missing_columns(conn, "settings", [
             "level INTEGER DEFAULT 1", "xp INTEGER DEFAULT 0", "water INTEGER DEFAULT 0", "weight REAL DEFAULT 70.0",
             "streak INTEGER DEFAULT 0", "age INTEGER DEFAULT 20", "height REAL DEFAULT 175.0",
             "gender TEXT DEFAULT 'male'", "activity REAL DEFAULT 1.2", "goal_type TEXT DEFAULT 'maintain'",
             "last_archive TEXT",
+            "diary_date TEXT",
         ])
         add_missing_columns(conn, "archive", ["goal INTEGER"])
 
         # Перенос старых данных на новую схему
         conn.execute("UPDATE settings SET xp = (SELECT COUNT(*) FROM history) * ? WHERE id = 1 AND xp = 0", (XP_PER_MEAL,))
         conn.execute("UPDATE settings SET last_archive = (SELECT date(MAX(date)) FROM archive) WHERE id = 1 AND last_archive IS NULL")
-
-
-init_db()
+        conn.execute("UPDATE settings SET diary_date = ? WHERE diary_date IS NULL", (today_str(),))
+        conn.execute("UPDATE history SET meal_date = (SELECT diary_date FROM settings WHERE id = 1) WHERE meal_date IS NULL")
 
 
 # ================= 2. ЛОГИКА И СИСТЕМА =================
@@ -123,10 +135,11 @@ def current_streak(streak: int, last_archive: Optional[str]) -> int:
     return streak if last_archive in (today_str(), yesterday) else 0
 
 
-def next_streak(streak: int, last_archive: Optional[str]) -> int:
-    if last_archive == today_str():
+def next_streak(streak: int, last_archive: Optional[str], day: Optional[str] = None) -> int:
+    current = date.fromisoformat(day) if day else date.today()
+    if last_archive == current.isoformat():
         return streak                 # повторное закрытие дня в тот же день стрик не растит
-    if last_archive == (date.today() - timedelta(days=1)).isoformat():
+    if last_archive == (current - timedelta(days=1)).isoformat():
         return streak + 1
     return 1                          # был пропуск — начинаем заново
 
@@ -139,12 +152,56 @@ def record_weight(conn, weight: float):
     """Один замер веса в день: повторный ввод за сегодня перезаписывает, а не плодит точки."""
     conn.execute("UPDATE settings SET weight = ? WHERE id = 1", (weight,))
     last = conn.execute("SELECT id, weight, date(date) FROM weight_history ORDER BY id DESC LIMIT 1").fetchone()
-    if last and last[1] == weight:
-        return
     if last and last[2] == today_str():
         conn.execute("UPDATE weight_history SET weight = ? WHERE id = ?", (weight, last[0]))
     else:
         conn.execute("INSERT INTO weight_history (weight, date) VALUES (?, datetime('now', 'localtime'))", (weight,))
+
+
+def archive_current_day(conn, day: str):
+    count, cal, p, f, c = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history"
+    ).fetchone()
+    goal, water, streak, last = conn.execute(
+        "SELECT daily_goal, water, streak, last_archive FROM settings WHERE id = 1"
+    ).fetchone()
+    if count or water:
+        existing = conn.execute("SELECT id FROM archive WHERE date(date) = ?", (day,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE archive SET cal = COALESCE(cal, 0) + ?, p = COALESCE(p, 0) + ?, f = COALESCE(f, 0) + ?, c = COALESCE(c, 0) + ?, water = COALESCE(water, 0) + ? WHERE id = ?",
+                (cal, p, f, c, water, existing[0]),
+            )
+        else:
+            conn.execute("INSERT INTO archive (date, cal, p, f, c, water, goal) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         (day, cal, p, f, c, water, goal))
+        conn.execute("UPDATE settings SET streak = ?, last_archive = ? WHERE id = 1",
+                     (next_streak(streak, last, day), day))
+    conn.execute("DELETE FROM history")
+    conn.execute("UPDATE settings SET water = 0 WHERE id = 1")
+
+
+def rollover_day(conn):
+    previous = conn.execute("SELECT diary_date FROM settings WHERE id = 1").fetchone()[0]
+    if previous < today_str():
+        archive_current_day(conn, previous)
+        conn.execute("UPDATE settings SET diary_date = ? WHERE id = 1", (today_str(),))
+
+
+def day_totals(conn):
+    active = conn.execute("SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history").fetchone()
+    archived = conn.execute("SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0), COALESCE(SUM(water), 0) FROM archive WHERE date(date) = ?", (today_str(),)).fetchone()
+    water = conn.execute("SELECT water FROM settings WHERE id = 1").fetchone()[0]
+    return (*[active[i] + archived[i] for i in range(4)], water + archived[4])
+
+
+def insert_meal(conn, name, cal, p, f, c):
+    conn.execute("INSERT INTO history (name, cal, p, f, c, time, meal_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (name, cal, p, f, c, now_hm(), today_str()))
+    add_xp(conn, XP_PER_MEAL)
+
+
+init_db()
 
 
 def get_user_level(xp_total: int):
@@ -194,6 +251,106 @@ def apply_auto_emoji(name: str):
     return f"🍽️ {name}"
 
 
+def food_name(value: str):
+    if not value.strip():
+        raise HTTPException(status_code=422, detail="Введи название блюда")
+    return apply_auto_emoji(value)
+
+
+def nutrient_fields(values=None):
+    values = values or {}
+    return '<div class="grid grid-cols-3 gap-2">' + ''.join(
+        f'<label class="text-xs font-bold text-slate-500">{label}<input type="number" name="{key}" min="0" max="2000" value="{values.get(key, 0)}" class="mt-1 w-full h-11 px-2 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-center"></label>'
+        for key, label in (("p", "Белки, г"), ("f", "Жиры, г"), ("c", "Углеводы, г"))
+    ) + '</div>'
+
+
+def food_form(action, name="", cal="", values=None, button="Сохранить", max_length=80):
+    return f"""<form action="{action}" method="post" class="flex flex-col gap-4">
+        <label class="text-xs font-bold text-slate-500">Название блюда<input name="name" value="{escape(name, quote=True)}" required maxlength="{max_length}" class="mt-1 w-full h-12 px-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700"></label>
+        <label class="text-xs font-bold text-slate-500">Калории на одну порцию<input type="number" name="cal" value="{cal}" required min="0" max="20000" class="mt-1 w-full h-12 px-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700"></label>
+        {nutrient_fields(values)}
+        <button class="h-12 rounded-xl bg-emerald-500 text-white font-bold">{button}</button>
+    </form>"""
+
+
+class SuggestedPortion(BaseModel):
+    id: int = Field(gt=0)
+    portions: float = Field(ge=0.25, le=3, multiple_of=0.25, allow_inf_nan=False)
+
+
+class SuggestedMeal(BaseModel):
+    day: date
+    request_id: UUID
+    items: list[SuggestedPortion] = Field(min_length=1, max_length=2)
+
+
+@app.get("/api/suggestions")
+def get_suggestions():
+    with db() as conn:
+        goal = conn.execute("SELECT daily_goal FROM settings WHERE id = 1").fetchone()[0]
+        remaining = max(0, goal - day_totals(conn)[0])
+        rows = conn.execute("SELECT id, name, cal, p, f, c FROM favorites ORDER BY id").fetchall()
+    favorites = [dict(zip(("id", "name", "cal", "p", "f", "c"), row)) for row in rows]
+    return {"day": today_str(), "remaining": remaining, "variants": suggest_meals(favorites, remaining)}
+
+
+@app.post("/api/suggestions/eat")
+def eat_suggestion(meal: SuggestedMeal):
+    with db() as conn:
+        if meal.day.isoformat() != today_str():
+            raise HTTPException(409, "Наступил новый день. Открой подбор заново.")
+        token = str(meal.request_id)
+        if conn.execute("SELECT 1 FROM suggestion_requests WHERE request_id = ?", (token,)).fetchone():
+            return {"saved": True}
+        if len({item.id for item in meal.items}) != len(meal.items):
+            raise HTTPException(422, "В сочетании должны быть разные блюда")
+        records = []
+        for item in meal.items:
+            row = conn.execute("SELECT name, cal, p, f, c FROM favorites WHERE id = ?", (item.id,)).fetchone()
+            if not row:
+                raise HTTPException(409, "Блюдо удалено из избранного. Открой подбор заново.")
+            values = scale_nutrients(dict(zip(("cal", "p", "f", "c"), row[1:])), item.portions)
+            if values["cal"] > 20000 or any(values[key] > 2000 for key in ("p", "f", "c")):
+                raise HTTPException(422, "Порция слишком большая. Уменьши её.")
+            name = row[0] if item.portions == 1 else f"{row[0]} ×{item.portions:g}"
+            records.append((name, *values.values()))
+        for record in records:
+            insert_meal(conn, *record)
+        conn.execute("INSERT INTO suggestion_requests (request_id, day) VALUES (?, ?)", (token, today_str()))
+    return {"saved": True}
+
+
+@app.get("/edit/{item_id}", response_class=HTMLResponse)
+def edit_page(item_id: int):
+    with db() as conn:
+        row = conn.execute("SELECT name, cal, p, f, c FROM history WHERE id = ?", (item_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Запись не найдена")
+    content = '<a href="/" class="text-sm text-emerald-500">← В дневник</a><h1 class="text-2xl font-black mt-5 mb-5">Редактировать запись</h1>'
+    content += food_form(f"/edit/{item_id}", row[0], row[1], dict(zip(("p", "f", "c"), row[2:])), max_length=120)
+    return render_page("Редактировать запись", content)
+
+
+@app.post("/edit/{item_id}")
+def edit_record(item_id: int, name: str = Form(..., min_length=1, max_length=120),
+                cal: int = Form(..., ge=0, le=20000), p: int = Form(0, ge=0, le=2000),
+                f: int = Form(0, ge=0, le=2000), c: int = Form(0, ge=0, le=2000)):
+    name = food_name(name)
+    with db() as conn:
+        if not conn.execute("UPDATE history SET name = ?, cal = ?, p = ?, f = ?, c = ? WHERE id = ?",
+                            (name, cal, p, f, c, item_id)).rowcount:
+            raise HTTPException(404, "Запись не найдена")
+    return RedirectResponse("/?edited=1", status_code=303)
+
+
+@app.get("/favorites/new", response_class=HTMLResponse)
+def new_favorite_page():
+    content = '<a href="/" class="text-sm text-violet-500">← В дневник</a><h1 class="text-2xl font-black mt-5 mb-2">Новый продукт</h1><p class="text-xs text-slate-500 mb-5">Укажи калории и БЖУ одной привычной порции. Она появится в подборе еды.</p>'
+    content += food_form("/add_fav", button="Сохранить в избранное")
+    return render_page("Новый продукт", content)
+
+
 # ================= 3. ГЛОБАЛЬНЫЙ ШАБЛОНИЗАТОР =================
 def render_page(title: str, content: str, active_tab: str = "home", scripts: str = ""):
     home_active = "text-emerald-500" if active_tab == "home" else "text-slate-400 hover:text-emerald-500"
@@ -221,8 +378,9 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
     <html lang="ru" class="antialiased">
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{title}</title>
+        <link rel="stylesheet" href="/static/suggestions.css">
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
@@ -354,13 +512,17 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
             else if (urlParams.has('unwater')) {{ showToast('−250 мл воды', 'info'); }}
             else if (urlParams.has('deleted')) {{ showToast('Запись удалена', 'error'); }}
             else if (urlParams.has('archived')) {{ confetti({{ particleCount: 150, spread: 90, origin: {{ y: 0.5 }}, colors: ['#10b981', '#3b82f6', '#f59e0b'] }}); showToast('День завершен!', 'success'); }}
-            else if (urlParams.has('saved')) {{ showToast('Настройки сохранены', 'success'); }}
+            else if (urlParams.has('edited')) {{ showToast('Запись обновлена', 'success'); }}
+            else if (urlParams.has('copied')) {{ showToast('Меню скопировано', 'success'); }}
+            else if (urlParams.has('saved')) {{ showToast('Изменения сохранены', 'success'); }}
             else if (urlParams.has('calculated')) {{ confetti({{ particleCount: 150, spread: 90, origin: {{ y: 0.5 }}, colors: ['#10b981', '#fcd34d'] }}); showToast('Норма пересчитана!', 'success'); }}
-            window.history.replaceState({{}}, document.title, window.location.pathname);
+            ['added', 'water', 'unwater', 'deleted', 'archived', 'saved', 'calculated', 'edited', 'copied'].forEach(key => urlParams.delete(key));
+            window.history.replaceState({{}}, document.title, window.location.pathname + (urlParams.size ? '?' + urlParams.toString() : ''));
 
             VanillaTilt.init(document.querySelectorAll("[data-tilt]"));
         </script>
         {scripts}
+        <script src="/static/suggestions.js" defer></script>
     </body>
     </html>
     """
@@ -375,10 +537,8 @@ def get_index():
         cursor = conn.execute("SELECT id, name, cal, p, f, c, time FROM history ORDER BY id DESC")
         history = [{"id": r[0], "name": r[1], "cal": r[2], "p": r[3], "f": r[4], "c": r[5], "time": r[6]} for r in cursor.fetchall()]
 
-        row = conn.execute("SELECT SUM(cal), SUM(p), SUM(f), SUM(c) FROM history").fetchone()
-        total_calories, total_p, total_f, total_c = row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
-
-        daily_goal, total_water = conn.execute("SELECT daily_goal, water FROM settings WHERE id = 1").fetchone()
+        total_calories, total_p, total_f, total_c, total_water = day_totals(conn)
+        daily_goal = conn.execute("SELECT daily_goal FROM settings WHERE id = 1").fetchone()[0]
         w_row = conn.execute("SELECT weight FROM weight_history ORDER BY id DESC LIMIT 1").fetchone()
         current_weight = w_row[0] if w_row else 70.0
 
@@ -423,8 +583,9 @@ def get_index():
                     <span class="text-[9px] font-bold text-slate-400">{item['time'] or ''}</span>
                 </div>
             </div>
+            <a href="/edit/{item['id']}" aria-label="Редактировать запись" class="text-slate-400 hover:text-violet-500 p-2 text-lg">✎</a>
             <form action="/delete/{item['id']}" method="post" class="m-0 flex-shrink-0">
-                <button type="submit" onclick="vibrateBtn()" class="text-slate-300 hover:text-red-500 bg-white dark:bg-slate-900 w-10 h-10 rounded-full transition-colors flex items-center justify-center border border-slate-100 dark:border-slate-800">
+                <button type="submit" aria-label="Удалить запись" onclick="vibrateBtn()" class="text-slate-300 hover:text-red-500 bg-white dark:bg-slate-900 w-10 h-10 rounded-full transition-colors flex items-center justify-center border border-slate-100 dark:border-slate-800">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
             </form>
@@ -457,6 +618,31 @@ def get_index():
         <div class="flex items-center gap-3 p-3 rounded-2xl border {coach_color} mb-6 text-xs font-bold shadow-sm transition-colors uppercase tracking-wide">
             <span class="animate-pulse">●</span> {coach_text}
         </div>
+
+        <section class="meal-discovery p-5 rounded-3xl mb-6 relative overflow-hidden shadow-xl">
+            <div class="flex justify-between items-start gap-3">
+                <div><p class="discovery-label mb-2">Твоё меню · новый вариант</p>
+                    <h2 class="text-2xl font-black tracking-tight">Что бы съесть?</h2>
+                    <p class="text-xs text-slate-300 mt-2 leading-relaxed">{'Осталось ' + str(max(0, diff)) + ' ккал. Соберём вкусную порцию?' if diff > 0 else 'Цель достигнута. Все блюда можно добавить через «+».'}</p>
+                </div><span class="discovery-orb shrink-0" aria-hidden="true">🍽️</span>
+            </div>
+            <button id="suggestion-open" type="button" class="w-full mt-5 h-12 rounded-2xl bg-violet-500 hover:bg-violet-400 text-white text-sm font-black transition active:scale-95">✦ Подобрать еду</button>
+            <p class="text-[10px] text-slate-400 text-center mt-3">Из твоего избранного · порции на твой вкус</p>
+        </section>
+        <dialog id="suggestion-dialog" class="suggestion-sheet" aria-labelledby="suggestion-title">
+            <div class="p-6">
+                <header class="flex justify-between items-center mb-5"><h2 id="suggestion-title" class="text-2xl font-black">Что бы съесть?</h2>
+                    <button id="suggestion-close" type="button" aria-label="Закрыть подбор" class="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-800 text-xl">×</button></header>
+                <div id="suggestion-panel"></div>
+                <div class="rounded-2xl p-4 bg-violet-50 dark:bg-violet-950/40 mt-4" aria-live="polite">
+                    <div class="text-4xl font-black text-violet-500"><span id="suggestion-cal">—</span> <span class="text-sm">ккал</span></div>
+                    <p id="suggestion-macros" class="text-xs font-bold mt-2 text-slate-500"></p><p id="suggestion-status" class="text-xs mt-3"></p>
+                </div>
+                <div class="flex gap-2 mt-5"><button id="suggestion-next" hidden type="button" class="flex-1 h-12 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-bold disabled:opacity-50">↻ Другой вариант</button>
+                    <button id="suggestion-eat" hidden type="button" class="flex-1 h-12 rounded-xl bg-violet-500 text-white text-xs font-black disabled:opacity-50">Я это съел</button></div>
+                <a href="/favorites/new" class="block text-center text-xs font-bold text-violet-500 mt-5">+ Добавить продукт в избранное</a>
+            </div>
+        </dialog>
 
         <div class="relative h-[180px] flex justify-center items-end overflow-hidden mb-8">
             <canvas id="calorieChart" class="w-full"></canvas>
@@ -554,6 +740,16 @@ def parse_plan_date(value: Optional[str]) -> date:
     return parsed if parsed.isoformat() == value and parsed >= date.today() else date.today()
 
 
+def require_plan_date(value: str) -> date:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(422, "Выбери корректную дату")
+    if parsed.isoformat() != value or parsed < date.today():
+        raise HTTPException(422, "Выбери сегодняшний или будущий день")
+    return parsed
+
+
 @app.get("/plan", response_class=HTMLResponse)
 def get_plan(day: Optional[str] = None):
     selected = parse_plan_date(day)
@@ -609,6 +805,7 @@ def get_plan(day: Optional[str] = None):
         </section>
         <h2 class="text-xs uppercase tracking-widest font-black text-slate-500 mb-3">Блюда на {plan_date}</h2>
         <ul class="flex flex-col gap-2 mb-6">{plan_items or '<li class="text-center text-xs text-slate-400 py-8">Пока ничего не запланировано</li>'}</ul>
+        {f'<section class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800"><h2 class="font-bold text-sm mb-2">Скопировать меню</h2><p class="text-xs text-slate-500 mb-3">Блюда добавятся к меню выбранного дня.</p><form action="/plan/copy" method="post" class="flex gap-2"><input type="hidden" name="day" value="{plan_date}"><input type="date" name="target_day" value="{tomorrow}" min="{today_str()}" required aria-label="Куда скопировать меню" class="flex-1 min-w-0 px-2 h-11 bg-white dark:bg-slate-900 rounded-xl text-xs"><button class="px-3 bg-emerald-500 text-white font-bold text-xs rounded-xl">Копировать</button></form></section>' if rows else ''}
     """
     return render_page("План питания", content, active_tab="plan")
 
@@ -619,18 +816,18 @@ def add_plan_item(
     cal: int = Form(..., ge=0, le=20000), meal_type: str = Form("Приём пищи"),
     p: int = Form(0, ge=0, le=2000), f: int = Form(0, ge=0, le=2000), c: int = Form(0, ge=0, le=2000),
 ):
-    selected = parse_plan_date(day)
+    selected = require_plan_date(day)
     allowed_types = {"Завтрак", "Обед", "Ужин", "Перекус", "Приём пищи"}
     meal_type = meal_type if meal_type in allowed_types else "Приём пищи"
     with db() as conn:
         conn.execute("INSERT INTO meal_plan (plan_date, meal_type, name, cal, p, f, c) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (selected.isoformat(), meal_type, apply_auto_emoji(name), cal, p, f, c))
+                     (selected.isoformat(), meal_type, food_name(name), cal, p, f, c))
     return RedirectResponse(url=f"/plan?day={selected.isoformat()}&saved=1", status_code=303)
 
 
 @app.post("/plan/add_favorite")
 def add_plan_favorite(day: str = Form(...), fav_id: int = Form(..., ge=1)):
-    selected = parse_plan_date(day)
+    selected = require_plan_date(day)
     with db() as conn:
         fav = conn.execute("SELECT name, cal, p, f, c FROM favorites WHERE id = ?", (fav_id,)).fetchone()
         if fav:
@@ -641,7 +838,7 @@ def add_plan_favorite(day: str = Form(...), fav_id: int = Form(..., ge=1)):
 
 @app.post("/plan/delete/{item_id}")
 def delete_plan_item(item_id: int, day: str = Form(...)):
-    selected = parse_plan_date(day)
+    selected = require_plan_date(day)
     with db() as conn:
         conn.execute("DELETE FROM meal_plan WHERE id = ? AND plan_date = ?", (item_id, selected.isoformat()))
     return RedirectResponse(url=f"/plan?day={selected.isoformat()}", status_code=303)
@@ -649,17 +846,27 @@ def delete_plan_item(item_id: int, day: str = Form(...)):
 
 @app.post("/plan/eat/{item_id}")
 def add_planned_to_diary(item_id: int, day: str = Form(...)):
-    selected = parse_plan_date(day)
+    selected = require_plan_date(day)
     if selected != date.today():
         return RedirectResponse(url=f"/plan?day={selected.isoformat()}", status_code=303)
     with db() as conn:
         item = conn.execute("SELECT name, cal, p, f, c FROM meal_plan WHERE id = ? AND plan_date = ?",
                             (item_id, selected.isoformat())).fetchone()
         if item:
-            conn.execute("INSERT INTO history (name, cal, p, f, c, time) VALUES (?, ?, ?, ?, ?, ?)", (*item, now_hm()))
-            add_xp(conn, XP_PER_MEAL)
+            insert_meal(conn, *item)
             conn.execute("DELETE FROM meal_plan WHERE id = ?", (item_id,))
     return RedirectResponse(url="/?added=1", status_code=303)
+
+
+@app.post("/plan/copy")
+def copy_plan(day: str = Form(...), target_day: str = Form(...)):
+    source, target = require_plan_date(day), require_plan_date(target_day)
+    if source == target:
+        raise HTTPException(422, "Выбери другой день для копирования")
+    with db() as conn:
+        conn.execute("INSERT INTO meal_plan (plan_date, meal_type, name, cal, p, f, c) SELECT ?, meal_type, name, cal, p, f, c FROM meal_plan WHERE plan_date = ?",
+                     (target.isoformat(), source.isoformat()))
+    return RedirectResponse(f"/plan?day={target.isoformat()}&copied=1", status_code=303)
 
 
 # ================= 6. АНАЛИТИКА И ПРОФИЛЬ =================
@@ -768,21 +975,20 @@ def get_stats():
 @app.get("/profile", response_class=HTMLResponse)
 def get_profile():
     with db() as conn:
-        stats = conn.execute("SELECT COUNT(*), SUM(cal), SUM(p), SUM(f), SUM(c) FROM history").fetchone()
-        t_cal, t_p, t_f, t_c = stats[1] or 0, stats[2] or 0, stats[3] or 0, stats[4] or 0
+        t_cal, t_p, t_f, t_c, t_water = day_totals(conn)
 
         settings = conn.execute(
             "SELECT daily_goal, water, streak, age, height, gender, activity, goal_type, xp, last_archive FROM settings WHERE id = 1"
         ).fetchone()
-        daily_goal, t_water, streak = settings[0], settings[1], settings[2]
+        daily_goal, streak = settings[0], settings[2]
         age, height, gender, activity, goal_type = settings[3], settings[4], settings[5], settings[6], settings[7]
         xp, last_archive = settings[8], settings[9]
 
         w_row = conn.execute("SELECT weight FROM weight_history ORDER BY id DESC LIMIT 1").fetchone()
         current_weight = w_row[0] if w_row else 70.0
 
-        cursor = conn.execute("SELECT id, name, cal FROM favorites ORDER BY id ASC")
-        favorites = [{"id": row[0], "name": row[1], "cal": row[2]} for row in cursor.fetchall()]
+        cursor = conn.execute("SELECT id, name, cal, p, f, c FROM favorites ORDER BY id ASC")
+        favorites = [{"id": row[0], "name": row[1], "cal": row[2], "p": row[3], "f": row[4], "c": row[5]} for row in cursor.fetchall()]
 
     streak = current_streak(streak, last_archive)
     level, current_xp, title = get_user_level(xp)
@@ -801,8 +1007,8 @@ def get_profile():
     fav_manager = "".join(
         f"""
         <li class="flex justify-between items-center py-3 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
-            <span class="text-sm font-bold text-slate-800 dark:text-slate-200">{escape(fav['name'])} <span class="text-emerald-500 text-[10px] bg-emerald-50 dark:bg-emerald-900/30 px-1.5 py-0.5 rounded-md">{fav['cal']}</span></span>
-            <form action="/delete_fav/{fav['id']}" method="post" class="m-0"><button type="submit" class="text-slate-400 hover:text-red-500 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-slate-50 dark:bg-slate-900 rounded-lg">Del</button></form>
+            <span class="text-sm font-bold text-slate-800 dark:text-slate-200">{escape(fav['name'])} <span class="text-emerald-500 text-[10px] bg-emerald-50 dark:bg-emerald-900/30 px-1.5 py-0.5 rounded-md">{fav['cal']} ккал</span><span class="block text-[10px] text-slate-500 mt-1">Б {fav['p']} · Ж {fav['f']} · У {fav['c']}</span></span>
+            <form action="/delete_fav/{fav['id']}" method="post" class="m-0"><button type="submit" class="text-slate-400 hover:text-red-500 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest bg-slate-50 dark:bg-slate-900 rounded-lg">Удалить</button></form>
         </li>
         """ for fav in favorites
     )
@@ -898,19 +1104,15 @@ def get_profile():
                     <label class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">Текущий вес</label>
                     <input type="number" step="0.1" name="new_weight" value="{current_weight}" required min="20" max="500" class="w-full h-12 px-4 font-bold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl outline-none text-slate-900 dark:text-white">
                 </div>
-                <button type="submit" onclick="vibrateBtn()" class="mt-5 px-5 h-12 bg-emerald-500 text-white font-black uppercase rounded-xl transition active:scale-95 text-xs">Save</button>
+                <button type="submit" onclick="vibrateBtn()" class="mt-5 px-5 h-12 bg-emerald-500 text-white font-black uppercase rounded-xl transition active:scale-95 text-xs">OK</button>
             </form>
         </div>
 
         <div class="mb-8">
             <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4 px-1">Менеджер Избранного</h3>
             <div class="bg-white dark:bg-slate-800 p-5 rounded-3xl border border-slate-100 dark:border-slate-700/50 shadow-sm">
-                <form action="/add_fav" method="post" class="flex gap-2 mb-4">
-                    <input type="text" name="name" placeholder="Название" required maxlength="80" class="flex-1 min-w-0 px-4 h-12 font-bold bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none">
-                    <input type="number" name="cal" placeholder="Ккал" required min="0" max="20000" class="w-20 min-w-0 px-2 h-12 font-black bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-center outline-none">
-                    <button type="submit" onclick="vibrateBtn()" class="px-5 bg-emerald-500 text-white rounded-xl text-xl font-bold hover:bg-emerald-600 active:scale-95 transition shadow-sm">+</button>
-                </form>
-                <ul class="flex flex-col">{fav_manager if fav_manager else '<span class="text-xs text-slate-400 text-center py-4 font-bold uppercase tracking-widest">Нет сохраненной еды</span>'}</ul>
+                {food_form("/add_fav", button="Добавить в избранное")}
+                <ul class="flex flex-col mt-4">{fav_manager if fav_manager else '<span class="text-xs text-slate-400 text-center py-4 font-bold uppercase tracking-widest">Нет сохраненной еды</span>'}</ul>
             </div>
         </div>
 
@@ -926,7 +1128,7 @@ def get_profile():
                     Завершить день в архив
                 </button>
             </form>
-            <p class="text-[10px] text-center text-slate-500 font-bold uppercase tracking-widest mt-4 px-4">Данные будут очищены и перенесены в Аналитику.</p>
+            <p class="text-[10px] text-center text-slate-500 font-bold mt-4 px-4">Записи переместятся в архив. Итоги за сегодня сохранятся; новый день начнётся автоматически.</p>
 
             <a href="/export.csv" class="mt-6 w-full h-12 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-black uppercase tracking-widest rounded-xl transition active:scale-95 text-[10px] flex items-center justify-center">Экспорт архива (CSV)</a>
         </div>
@@ -954,10 +1156,9 @@ def add_record(
     c: int = Form(0, ge=0, le=2000),
     save_fav: Optional[str] = Form(None),
 ):
-    name = apply_auto_emoji(food) or "🍽️ Без названия"
+    name = food_name(food)
     with db() as conn:
-        conn.execute("INSERT INTO history (name, cal, p, f, c, time) VALUES (?, ?, ?, ?, ?, ?)", (name, cal, p, f, c, now_hm()))
-        add_xp(conn, XP_PER_MEAL)
+        insert_meal(conn, name, cal, p, f, c)
         if save_fav:
             conn.execute("INSERT INTO favorites (name, cal, p, f, c) VALUES (?, ?, ?, ?, ?)", (name, cal, p, f, c))
     return RedirectResponse(url="/?added=1", status_code=303)
@@ -968,16 +1169,16 @@ def add_quick(fav_id: int):
     with db() as conn:
         fav = conn.execute("SELECT name, cal, p, f, c FROM favorites WHERE id = ?", (fav_id,)).fetchone()
         if fav:
-            conn.execute("INSERT INTO history (name, cal, p, f, c, time) VALUES (?, ?, ?, ?, ?, ?)", (*fav, now_hm()))
-            add_xp(conn, XP_PER_MEAL)
+            insert_meal(conn, *fav)
     return RedirectResponse(url="/?added=1", status_code=303)
 
 
 @app.post("/add_fav")
-def add_fav(name: str = Form(..., min_length=1, max_length=80), cal: int = Form(..., ge=0, le=20000)):
-    name = apply_auto_emoji(name)
+def add_fav(name: str = Form(..., min_length=1, max_length=80), cal: int = Form(..., ge=0, le=20000),
+            p: int = Form(0, ge=0, le=2000), f: int = Form(0, ge=0, le=2000), c: int = Form(0, ge=0, le=2000)):
+    name = food_name(name)
     with db() as conn:
-        conn.execute("INSERT INTO favorites (name, cal, p, f, c) VALUES (?, ?, 0, 0, 0)", (name, cal))
+        conn.execute("INSERT INTO favorites (name, cal, p, f, c) VALUES (?, ?, ?, ?, ?)", (name, cal, p, f, c))
     return RedirectResponse(url="/profile?saved=1", status_code=303)
 
 
@@ -1021,12 +1222,12 @@ def update_settings(new_goal: int = Form(..., ge=800, le=10000), new_weight: flo
 
 @app.post("/calculate_goal")
 def calculate_goal(
-    gender: str = Form(...),
+    gender: Literal["male", "female"] = Form(...),
     age: int = Form(..., ge=10, le=100),
     height: float = Form(..., ge=100, le=250),
     weight: float = Form(..., ge=20, le=500),
     activity: float = Form(..., ge=1.0, le=2.5),
-    goal_type: str = Form(...),
+    goal_type: Literal["lose", "maintain", "gain"] = Form(...),
 ):
     # Формула Миффлина — Сан-Жеора
     bmr = (10 * weight) + (6.25 * height) - (5 * age) + (5 if gender == "male" else -161)
@@ -1038,7 +1239,7 @@ def calculate_goal(
     else:
         final_goal = int(tdee)
     # Страховка от слишком жёсткого дефицита
-    final_goal = max(final_goal, 1200 if gender == "female" else 1500)
+    final_goal = min(10000, max(final_goal, 1200 if gender == "female" else 1500))
 
     with db() as conn:
         conn.execute(
@@ -1052,32 +1253,7 @@ def calculate_goal(
 @app.post("/archive_day")
 def archive_day():
     with db() as conn:
-        t_cal, t_p, t_f, t_c = conn.execute(
-            "SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history"
-        ).fetchone()
-        daily_goal, t_water, streak, last_archive = conn.execute(
-            "SELECT daily_goal, water, streak, last_archive FROM settings WHERE id = 1"
-        ).fetchone()
-
-        if t_cal > 0 or t_water > 0:
-            existing = conn.execute("SELECT id FROM archive WHERE date(date) = date('now', 'localtime')").fetchone()
-            if existing:   # день закрывали уже сегодня — дописываем в ту же строку, а не плодим дубли
-                conn.execute(
-                    "UPDATE archive SET cal = cal + ?, p = p + ?, f = f + ?, c = c + ?, water = water + ?, goal = ? WHERE id = ?",
-                    (t_cal, t_p, t_f, t_c, t_water, daily_goal, existing[0]),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO archive (date, cal, p, f, c, water, goal) VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?)",
-                    (t_cal, t_p, t_f, t_c, t_water, daily_goal),
-                )
-            conn.execute(
-                "UPDATE settings SET streak = ?, last_archive = ? WHERE id = 1",
-                (next_streak(streak, last_archive), today_str()),
-            )
-
-        conn.execute("DELETE FROM history")
-        conn.execute("UPDATE settings SET water = 0 WHERE id = 1")
+        archive_current_day(conn, today_str())
     return RedirectResponse(url="/profile?archived=1", status_code=303)
 
 
@@ -1098,4 +1274,4 @@ def export_csv():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

@@ -1,3 +1,9 @@
 venv/
 __pycache__/
 *.pyc
+.venv/
+backups/
+tests/
+*.db-journal
+*.db-wal
+*.db-shm
