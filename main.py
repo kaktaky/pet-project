@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Literal, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import uvicorn
 from fastapi import FastAPI, Form, HTTPException
@@ -86,6 +86,16 @@ def init_db():
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meal_plan_date ON meal_plan(plan_date)")
         conn.execute("CREATE TABLE IF NOT EXISTS suggestion_requests (request_id TEXT PRIMARY KEY, day TEXT NOT NULL)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS archived_meals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meal_date TEXT NOT NULL, name TEXT NOT NULL, cal INTEGER NOT NULL,
+            p INTEGER NOT NULL DEFAULT 0, f INTEGER NOT NULL DEFAULT 0,
+            c INTEGER NOT NULL DEFAULT 0, time TEXT
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_archived_meals_date ON archived_meals(meal_date)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS meal_repeat_requests (
+            request_id TEXT PRIMARY KEY, meal_id INTEGER NOT NULL, day TEXT NOT NULL
+        )""")
 
         conn.execute("INSERT OR IGNORE INTO settings (id, daily_goal) VALUES (1, 2000)")
 
@@ -106,13 +116,14 @@ def init_db():
             "last_archive TEXT",
             "diary_date TEXT",
         ])
-        add_missing_columns(conn, "archive", ["goal INTEGER"])
+        add_missing_columns(conn, "archive", ["goal INTEGER", "details_complete INTEGER NOT NULL DEFAULT 0"])
 
         # Перенос старых данных на новую схему
         conn.execute("UPDATE settings SET xp = (SELECT COUNT(*) FROM history) * ? WHERE id = 1 AND xp = 0", (XP_PER_MEAL,))
         conn.execute("UPDATE settings SET last_archive = (SELECT date(MAX(date)) FROM archive) WHERE id = 1 AND last_archive IS NULL")
         conn.execute("UPDATE settings SET diary_date = ? WHERE diary_date IS NULL", (today_str(),))
         conn.execute("UPDATE history SET meal_date = (SELECT diary_date FROM settings WHERE id = 1) WHERE meal_date IS NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_history_date ON history(meal_date)")
 
 
 # ================= 2. ЛОГИКА И СИСТЕМА =================
@@ -160,7 +171,8 @@ def record_weight(conn, weight: float):
 
 def archive_current_day(conn, day: str):
     count, cal, p, f, c = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history"
+        "SELECT COUNT(*), COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history WHERE meal_date = ?",
+        (day,),
     ).fetchone()
     goal, water, streak, last = conn.execute(
         "SELECT daily_goal, water, streak, last_archive FROM settings WHERE id = 1"
@@ -173,11 +185,15 @@ def archive_current_day(conn, day: str):
                 (cal, p, f, c, water, existing[0]),
             )
         else:
-            conn.execute("INSERT INTO archive (date, cal, p, f, c, water, goal) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            conn.execute("INSERT INTO archive (date, cal, p, f, c, water, goal, details_complete) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
                          (day, cal, p, f, c, water, goal))
         conn.execute("UPDATE settings SET streak = ?, last_archive = ? WHERE id = 1",
                      (next_streak(streak, last, day), day))
-    conn.execute("DELETE FROM history")
+    # Перенос и итог дня коммитятся вместе; повторное закрытие не копирует еду снова.
+    conn.execute("""INSERT INTO archived_meals (meal_date, name, cal, p, f, c, time)
+        SELECT meal_date, name, cal, COALESCE(p, 0), COALESCE(f, 0), COALESCE(c, 0), time
+        FROM history WHERE meal_date = ?""", (day,))
+    conn.execute("DELETE FROM history WHERE meal_date = ?", (day,))
     conn.execute("UPDATE settings SET water = 0 WHERE id = 1")
 
 
@@ -188,10 +204,11 @@ def rollover_day(conn):
         conn.execute("UPDATE settings SET diary_date = ? WHERE id = 1", (today_str(),))
 
 
-def day_totals(conn):
-    active = conn.execute("SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history").fetchone()
-    archived = conn.execute("SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0), COALESCE(SUM(water), 0) FROM archive WHERE date(date) = ?", (today_str(),)).fetchone()
-    water = conn.execute("SELECT water FROM settings WHERE id = 1").fetchone()[0]
+def day_totals(conn, day: Optional[str] = None):
+    day = day or today_str()
+    active = conn.execute("SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0) FROM history WHERE meal_date = ?", (day,)).fetchone()
+    archived = conn.execute("SELECT COALESCE(SUM(cal), 0), COALESCE(SUM(p), 0), COALESCE(SUM(f), 0), COALESCE(SUM(c), 0), COALESCE(SUM(water), 0) FROM archive WHERE date(date) = ?", (day,)).fetchone()
+    water = conn.execute("SELECT water FROM settings WHERE id = 1").fetchone()[0] if day == today_str() else 0
     return (*[active[i] + archived[i] for i in range(4)], water + archived[4])
 
 
@@ -351,8 +368,152 @@ def new_favorite_page():
     return render_page("Новый продукт", content)
 
 
+def require_diary_date(value: Optional[str]) -> date:
+    if value is None:
+        return date.today()
+    try:
+        selected = date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(422, "Выбери корректную дату")
+    if selected.isoformat() != value or selected > date.today():
+        raise HTTPException(422, "Выбери сегодняшний или прошедший день")
+    return selected
+
+
+def diary_meals(conn, day: str):
+    rows = conn.execute("""
+        SELECT id, name, cal, p, f, c, time, 0 AS archived FROM history WHERE meal_date = ?
+        UNION ALL
+        SELECT id, name, cal, p, f, c, time, 1 AS archived FROM archived_meals WHERE meal_date = ?
+        ORDER BY time DESC, id DESC, archived
+    """, (day, day)).fetchall()
+    return [dict(zip(("id", "name", "cal", "p", "f", "c", "time", "archived"), row)) for row in rows]
+
+
+def diary_calendar(conn, selected: date):
+    today = date.today()
+    # Семь дней вокруг выбранной даты; сегодняшняя неделя заканчивается сегодня.
+    end = min(today.toordinal(), max(7, selected.toordinal() + 3))
+    start = max(1, end - 6)
+    days = [date.fromordinal(ordinal) for ordinal in range(start, end + 1)]
+    logged = {row[0] for row in conn.execute("""
+        SELECT date(date) FROM archive WHERE date(date) BETWEEN ? AND ?
+        UNION SELECT meal_date FROM history WHERE meal_date BETWEEN ? AND ?
+    """, (days[0].isoformat(), days[-1].isoformat()) * 2)}
+    weekdays = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+    tiles = []
+    for day in days:
+        active = day == selected
+        colors = "bg-emerald-500 text-white shadow-sm" if active else "bg-slate-50 dark:bg-slate-900 text-slate-500 hover:bg-emerald-50 dark:hover:bg-slate-800"
+        dot = "bg-white" if active else "bg-emerald-500"
+        marker = f'<span class="w-1 h-1 rounded-full {dot}"></span>' if day.isoformat() in logged else '<span class="w-1 h-1"></span>'
+        current_attr = 'aria-current="date"' if active else ''
+        tiles.append(f'<a href="/?day={day.isoformat()}" aria-label="{day.strftime("%d.%m.%Y")}" {current_attr} class="flex flex-col items-center gap-1 py-2 rounded-xl {colors}"><span class="text-[9px] font-bold">{weekdays[day.weekday()]}</span><span class="text-sm font-black">{day.day}</span>{marker}</a>')
+    previous = (f'<a href="/?day={(selected - timedelta(days=1)).isoformat()}" aria-label="Предыдущий день" class="w-10 h-10 grid place-items-center rounded-xl bg-slate-100 dark:bg-slate-800 text-xl">‹</a>'
+                if selected > date.min else '<span aria-disabled="true" class="w-10 h-10 grid place-items-center text-slate-300">‹</span>')
+    following = (f'<a href="/?day={(selected + timedelta(days=1)).isoformat()}" aria-label="Следующий день" class="w-10 h-10 grid place-items-center rounded-xl bg-slate-100 dark:bg-slate-800 text-xl">›</a>'
+                 if selected < today else '<span aria-disabled="true" class="w-10 h-10 grid place-items-center text-slate-300">›</span>')
+    return f"""<section aria-label="Календарь питания" class="mb-6 p-4 rounded-3xl border border-slate-100 dark:border-slate-800">
+        <div class="flex justify-between items-center gap-2 mb-3">
+            <div><p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Дневник питания</p>
+                <p class="text-lg font-black">{selected.strftime('%d.%m.%Y')}{' · Сегодня' if selected == today else ''}</p></div>
+            <div class="flex gap-1">{previous}{following}</div>
+        </div>
+        <div class="grid grid-cols-7 gap-1 mb-3">{''.join(tiles)}</div>
+        <form action="/" method="get" class="flex gap-2">
+            <input type="date" name="day" aria-label="Дата дневника" value="{selected.isoformat()}" min="0001-01-01" max="{today.isoformat()}" required class="flex-1 min-w-0 h-11 px-2 rounded-xl bg-slate-50 dark:bg-slate-900 text-xs border border-slate-200 dark:border-slate-700">
+            <button class="px-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs font-bold">Открыть</button>
+            {('<a href="/" class="px-3 h-11 grid place-items-center rounded-xl bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 text-xs font-bold">Сегодня</a>' if selected < today else '')}
+        </form>
+    </section>"""
+
+
+def diary_items_html(meals, historical=False):
+    items = []
+    for item in meals:
+        if historical:
+            actions = f"""<form action="/diary/repeat/{item['id']}" method="post" class="shrink-0">
+                <input type="hidden" name="day" value="{today_str()}">
+                <input type="hidden" name="request_id" value="{uuid4()}">
+                <button class="px-3 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">Повторить<br>сегодня</button>
+            </form>"""
+        elif item["archived"]:
+            actions = '<span class="shrink-0 text-[9px] font-bold text-slate-400">Сохранено</span>'
+        else:
+            actions = f"""<a href="/edit/{item['id']}" aria-label="Редактировать запись" class="text-slate-400 hover:text-violet-500 p-2 text-lg">✎</a>
+                <form action="/delete/{item['id']}" method="post" class="m-0 shrink-0">
+                    <button type="submit" aria-label="Удалить запись" class="text-slate-400 hover:text-red-500 w-10 h-10 rounded-full border border-slate-100 dark:border-slate-800 text-xl">×</button>
+                </form>"""
+        items.append(f"""<li class="flex justify-between items-center gap-2 bg-white dark:bg-slate-800/80 p-4 rounded-2xl border border-slate-100 dark:border-slate-700/50 mb-2 shadow-sm">
+            <div class="min-w-0 flex-1">
+                <span class="block font-bold text-sm break-words">{escape(item['name'])}</span>
+                <div class="flex flex-wrap gap-x-2 gap-y-1 mt-1">
+                    <span class="text-xs font-black text-emerald-500">{item['cal']} ккал</span>
+                    <span class="text-[10px] font-bold text-slate-500">Б:{item['p'] or 0} Ж:{item['f'] or 0} У:{item['c'] or 0}</span>
+                    <span class="text-[10px] text-slate-400">{escape(item['time'] or '')}</span>
+                </div>
+            </div>{actions}
+        </li>""")
+    return ''.join(items)
+
+
+def diary_legacy_notice(conn, day):
+    incomplete = conn.execute("SELECT 1 FROM archive WHERE date(date) = ? AND details_complete = 0 LIMIT 1", (day,)).fetchone()
+    return ('<p class="mb-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 text-xs leading-relaxed">'
+            'Этот день содержит старые записи: общие итоги сохранены, но часть или все названия блюд недоступны.</p>' if incomplete else '')
+
+
+def past_diary_page(selected: date):
+    day = selected.isoformat()
+    with db() as conn:
+        meals = diary_meals(conn, day)
+        cal, p, f, c, water = day_totals(conn, day)
+        saved_goal = conn.execute("SELECT goal FROM archive WHERE date(date) = ? AND goal IS NOT NULL ORDER BY id LIMIT 1", (day,)).fetchone()
+        calendar = diary_calendar(conn, selected)
+        notice = diary_legacy_notice(conn, day)
+    goal_html = f'<span class="text-sm text-slate-400">/ {saved_goal[0]} ккал</span>' if saved_goal else '<span class="text-sm text-slate-400">ккал</span>'
+    items = diary_items_html(meals, historical=True)
+    empty = '<li class="p-8 text-center text-xs text-slate-500 rounded-2xl bg-slate-50 dark:bg-slate-900">' + ('Подробные записи за этот день недоступны' if notice else 'За этот день нет записей') + '</li>'
+    content = f"""<header class="mb-5"><h1 class="text-3xl font-black tracking-tight">История питания<span class="text-emerald-500">.</span></h1>
+        <p class="text-xs text-slate-500 mt-2">Прошедшие дни доступны для просмотра. Любое блюдо можно повторить сегодня.</p></header>
+        {calendar}
+        <section class="p-5 rounded-3xl bg-slate-900 text-white mb-5">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Итоги дня</p>
+            <p class="text-4xl font-black mt-2">{cal} {goal_html}</p>
+            <div class="grid grid-cols-3 gap-2 mt-4 text-center text-xs">
+                <div class="p-2 rounded-xl bg-white/5">Белки<strong class="block mt-1 text-blue-400">{p} г</strong></div>
+                <div class="p-2 rounded-xl bg-white/5">Жиры<strong class="block mt-1 text-amber-400">{f} г</strong></div>
+                <div class="p-2 rounded-xl bg-white/5">Углеводы<strong class="block mt-1 text-emerald-400">{c} г</strong></div>
+            </div>
+            <p class="text-xs font-bold text-blue-300 mt-4">💧 Вода за день: {water} мл</p>
+        </section>
+        {notice}
+        <h2 class="text-xs font-black uppercase tracking-widest text-slate-500 mb-3">Журнал питания · {len(meals)}</h2>
+        <ul>{items or empty}</ul>"""
+    return render_page("История питания", content, show_add_button=False)
+
+
+@app.post("/diary/repeat/{item_id}")
+def repeat_meal(item_id: int, day: date = Form(...), request_id: UUID = Form(...)):
+    with db() as conn:
+        if day.isoformat() != today_str():
+            raise HTTPException(409, "Наступил новый день. Открой историю заново.")
+        token = str(request_id)
+        existing = conn.execute("SELECT meal_id, day FROM meal_repeat_requests WHERE request_id = ?", (token,)).fetchone()
+        if existing:
+            if existing != (item_id, day.isoformat()):
+                raise HTTPException(409, "Запрос уже использован для другого блюда")
+        else:
+            meal = conn.execute("SELECT name, cal, p, f, c FROM archived_meals WHERE id = ? AND meal_date < ?", (item_id, today_str())).fetchone()
+            if not meal:
+                raise HTTPException(404, "Блюдо в истории не найдено")
+            insert_meal(conn, *meal)
+            conn.execute("INSERT INTO meal_repeat_requests (request_id, meal_id, day) VALUES (?, ?, ?)", (token, item_id, today_str()))
+    return RedirectResponse("/?repeated=1", status_code=303)
+
+
 # ================= 3. ГЛОБАЛЬНЫЙ ШАБЛОНИЗАТОР =================
-def render_page(title: str, content: str, active_tab: str = "home", scripts: str = ""):
+def render_page(title: str, content: str, active_tab: str = "home", scripts: str = "", show_add_button: bool = True):
     home_active = "text-emerald-500" if active_tab == "home" else "text-slate-400 hover:text-emerald-500"
     plan_active = "text-emerald-500" if active_tab == "plan" else "text-slate-400 hover:text-emerald-500"
     stats_active = "text-emerald-500" if active_tab == "stats" else "text-slate-400 hover:text-emerald-500"
@@ -410,8 +571,8 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
             </div>
 
             <!-- Плавающая кнопка (FAB) справа внизу -->
-            <div class="absolute bottom-[90px] right-6 z-50">
-                <button onclick="toggleModal(); vibrateBtn()" class="w-14 h-14 bg-emerald-500 hover:bg-emerald-400 text-white rounded-full shadow-[0_8px_20px_rgba(16,185,129,0.5)] flex items-center justify-center transition-transform active:scale-95">
+            <div class="absolute bottom-[90px] right-6 z-50" {'hidden' if not show_add_button else ''}>
+                <button aria-label="Добавить еду за сегодня" onclick="toggleModal(); vibrateBtn()" class="w-14 h-14 bg-emerald-500 hover:bg-emerald-400 text-white rounded-full shadow-[0_8px_20px_rgba(16,185,129,0.5)] flex items-center justify-center transition-transform active:scale-95">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 </button>
             </div>
@@ -508,6 +669,7 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
 
             const urlParams = new URLSearchParams(window.location.search);
             if (urlParams.has('added')) {{ showToast('Запись добавлена', 'success'); }}
+            else if (urlParams.has('repeated')) {{ showToast('Блюдо добавлено на сегодня', 'success'); }}
             else if (urlParams.has('water')) {{ showToast('+250 мл воды', 'info'); }}
             else if (urlParams.has('unwater')) {{ showToast('−250 мл воды', 'info'); }}
             else if (urlParams.has('deleted')) {{ showToast('Запись удалена', 'error'); }}
@@ -516,7 +678,7 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
             else if (urlParams.has('copied')) {{ showToast('Меню скопировано', 'success'); }}
             else if (urlParams.has('saved')) {{ showToast('Изменения сохранены', 'success'); }}
             else if (urlParams.has('calculated')) {{ confetti({{ particleCount: 150, spread: 90, origin: {{ y: 0.5 }}, colors: ['#10b981', '#fcd34d'] }}); showToast('Норма пересчитана!', 'success'); }}
-            ['added', 'water', 'unwater', 'deleted', 'archived', 'saved', 'calculated', 'edited', 'copied'].forEach(key => urlParams.delete(key));
+            ['added', 'repeated', 'water', 'unwater', 'deleted', 'archived', 'saved', 'calculated', 'edited', 'copied'].forEach(key => urlParams.delete(key));
             window.history.replaceState({{}}, document.title, window.location.pathname + (urlParams.size ? '?' + urlParams.toString() : ''));
 
             VanillaTilt.init(document.querySelectorAll("[data-tilt]"));
@@ -532,10 +694,14 @@ def render_page(title: str, content: str, active_tab: str = "home", scripts: str
 # Обработчики — обычные def: FastAPI сам запускает их в пуле потоков,
 # поэтому блокирующий sqlite не вешает event loop (раньше было async def).
 @app.get("/", response_class=HTMLResponse)
-def get_index():
+def get_index(day: Optional[str] = None):
+    selected = require_diary_date(day)
+    if selected < date.today():
+        return past_diary_page(selected)
     with db() as conn:
-        cursor = conn.execute("SELECT id, name, cal, p, f, c, time FROM history ORDER BY id DESC")
-        history = [{"id": r[0], "name": r[1], "cal": r[2], "p": r[3], "f": r[4], "c": r[5], "time": r[6]} for r in cursor.fetchall()]
+        history = diary_meals(conn, selected.isoformat())
+        calendar = diary_calendar(conn, selected)
+        legacy_notice = diary_legacy_notice(conn, selected.isoformat())
 
         total_calories, total_p, total_f, total_c, total_water = day_totals(conn)
         daily_goal = conn.execute("SELECT daily_goal FROM settings WHERE id = 1").fetchone()[0]
@@ -572,26 +738,7 @@ def get_index():
         </div>
     """
 
-    items_html = "".join(
-        f"""
-        <li class="flex justify-between items-center bg-white dark:bg-slate-800/80 p-4 rounded-2xl border border-slate-100 dark:border-slate-700/50 mb-2 shadow-sm">
-            <div class="flex flex-col min-w-0 flex-1">
-                <span class="font-bold text-slate-800 dark:text-slate-200 truncate pr-2 text-sm">{escape(item['name'])}</span>
-                <div class="flex items-center gap-2 mt-1">
-                    <span class="text-xs font-black text-emerald-500">{item['cal']} ккал</span>
-                    <span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest bg-slate-50 dark:bg-slate-900 px-1.5 py-0.5 rounded-md border border-slate-100 dark:border-slate-700">Б:{item['p']} Ж:{item['f']} У:{item['c']}</span>
-                    <span class="text-[9px] font-bold text-slate-400">{item['time'] or ''}</span>
-                </div>
-            </div>
-            <a href="/edit/{item['id']}" aria-label="Редактировать запись" class="text-slate-400 hover:text-violet-500 p-2 text-lg">✎</a>
-            <form action="/delete/{item['id']}" method="post" class="m-0 flex-shrink-0">
-                <button type="submit" aria-label="Удалить запись" onclick="vibrateBtn()" class="text-slate-300 hover:text-red-500 bg-white dark:bg-slate-900 w-10 h-10 rounded-full transition-colors flex items-center justify-center border border-slate-100 dark:border-slate-800">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                </button>
-            </form>
-        </li>
-        """ for item in history
-    )
+    items_html = diary_items_html(history)
 
     color_class = "text-emerald-500" if total_calories <= daily_goal else "text-red-500"
 
@@ -614,6 +761,8 @@ def get_index():
                 <span class="text-lg">K</span>
             </div>
         </div>
+
+        {calendar}
 
         <div class="flex items-center gap-3 p-3 rounded-2xl border {coach_color} mb-6 text-xs font-bold shadow-sm transition-colors uppercase tracking-wide">
             <span class="animate-pulse">●</span> {coach_text}
@@ -672,6 +821,7 @@ def get_index():
 
         <div class="mb-4">
             <h3 class="text-[11px] font-black text-slate-800 dark:text-slate-200 uppercase tracking-widest mb-4 px-1">Журнал питания</h3>
+            {legacy_notice}
             <ul class="flex flex-col gap-1">
                 {items_html if items_html else '<div class="text-center text-slate-500 py-10 bg-white dark:bg-slate-800/50 rounded-3xl border border-slate-100 dark:border-slate-700/50 text-xs font-bold uppercase tracking-widest">Список пуст</div>'}
             </ul>
@@ -909,7 +1059,7 @@ def get_stats():
 
     archive_html = "".join(
         f"""
-        <div class="bg-white dark:bg-slate-800 p-5 rounded-3xl border border-slate-100 dark:border-slate-700/50 mb-3 shadow-sm">
+        <a href="/?day={row[0].split()[0]}" aria-label="Открыть питание за {row[0].split()[0]}" class="block bg-white dark:bg-slate-800 p-5 rounded-3xl border border-slate-100 dark:border-slate-700/50 mb-3 shadow-sm hover:border-emerald-500 transition-colors">
             <div class="flex justify-between items-center mb-3">
                 <span class="font-black text-slate-800 dark:text-slate-200 text-sm tracking-wider">{row[0].split()[0]}</span>
                 <span class="text-sm font-black text-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 px-2 py-1 rounded-lg">{row[1]} ккал</span>
@@ -918,7 +1068,8 @@ def get_stats():
                 <span class="bg-slate-50 dark:bg-slate-900 px-2 py-1 rounded-md border border-slate-100 dark:border-slate-700">Б:{row[2]} Ж:{row[3]} У:{row[4]}</span>
                 <span class="text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-1 rounded-md">💧 {row[5]} мл</span>
             </div>
-        </div>
+            <p class="text-[10px] font-bold text-emerald-500 mt-3">Открыть день →</p>
+        </a>
         """ for row in archive_data
     )
 
@@ -1122,13 +1273,13 @@ def get_profile():
                 {ach_html}
             </div>
 
-            <form action="/archive_day" method="post" onsubmit="return confirm('Завершить день? Журнал и вода за сегодня будут очищены.')">
+            <form action="/archive_day" method="post" onsubmit="return confirm('Сохранить итоги дня? Блюда останутся в истории питания.')">
                 <button type="submit" onclick="vibrateBtn()" class="w-full h-16 bg-red-500/10 text-red-500 font-black uppercase tracking-widest rounded-2xl transition active:scale-95 text-xs flex items-center justify-center gap-2 border border-red-500/30 shadow-[0_0_15px_rgba(239,68,68,0.1)] hover:bg-red-500/20">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                     Завершить день в архив
                 </button>
             </form>
-            <p class="text-[10px] text-center text-slate-500 font-bold mt-4 px-4">Записи переместятся в архив. Итоги за сегодня сохранятся; новый день начнётся автоматически.</p>
+            <p class="text-[10px] text-center text-slate-500 font-bold mt-4 px-4">Блюда и итоги останутся в дневнике. Сохранённые записи доступны для просмотра; новый день начнётся автоматически.</p>
 
             <a href="/export.csv" class="mt-6 w-full h-12 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-black uppercase tracking-widest rounded-xl transition active:scale-95 text-[10px] flex items-center justify-center">Экспорт архива (CSV)</a>
         </div>
