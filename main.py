@@ -2,7 +2,7 @@
 Дневник питания — FastAPI + SQLite.
 
 Запуск:  python main.py   (или: uvicorn main:app --reload)
-Переменные окружения (необязательные): CALORIES_DB, HOST, PORT
+Переменные окружения (н  еобязательные): CALORIES_DB, HOST, PORT
 """
 
 
