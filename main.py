@@ -1,5 +1,5 @@
 """
-Дневник питания — FastAPI + SQLite.
+Дневник питания — FastAPI +   SQLite.
 
 Запуск:  python main.py   (или: uvicorn main:app --reload)
 Переменные окружения (н  еобязательные): CALO  RIES_DB, HOST, PORT
